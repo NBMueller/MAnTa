@@ -83,25 +83,26 @@ LIB_COLORS = [
 # ------------------------------------------------------------------------------
 
 class TapestriDNA:
-    def __init__(self, read_file, SNP_file, panel_file=None):
+    def __init__(self, panel_file):
+        print(f'Loading panel from: {panel_file}')
+        self.panel = Panel(panel_file)
+
+
+    def load_sample_data(self, read_file, SNP_file):
         print(f'Loading SNPs  from: {SNP_file}')
         self.SNPs = SNPData(SNP_file)
         print(f'Loading reads from: {read_file}')
         self.reads = ReadData(read_file)
 
-        assert self.reads.df.shape[0] == self.SNPs.df.shape[0], \
-            'Number of cells in read and SNP files do not match'
+        if self.reads.df.shape[0] != self.SNPs.df.shape[0]:
+            print('!Warning: Number of cells in read and SNP files do not match. '\
+                    'Taking only cells present in SNP data')
+            self.reads.df = self.reads.df.loc[self.SNPs.df.index]
 
         self.cells = pd.DataFrame(np.zeros(self.SNPs.df.shape[0]),
             index=self.SNPs.df.index, columns=['cluster'])
         self.cells.index.name = 'barcode'
         self.cells['assignmnet'] = 'unknown'
-
-        if panel_file:
-            print(f'Loading panel from: {panel_file}')
-            self.panel = Panel(panel_file)
-        else:
-            self.panel = None
 
 
     def safe_annotation(self):
@@ -115,8 +116,11 @@ class TapestriDNA:
         return os.path.join(read_dir, f'{prefix}_annotated.csv')
 
 
-    def update_cluster_number(self, n_clusters):
-        cells, clusters = self.SNPs.get_clusters(n_clusters)
+    def update_cluster_number(self, n_clusters, cl_reads):
+        if cl_reads:
+            cells, clusters = self.reads.get_clusters(n_clusters)
+        else:
+            cells, clusters = self.SNPs.get_clusters(n_clusters)
         self.cells = self.cells.loc[cells]
         self.cells['cluster'] = clusters
         
@@ -232,6 +236,10 @@ class Data:
         pass
 
 
+    def get_clusters(self, n_clusters):
+        pass
+
+
 # ------------------------------------------------------------------------------
 
 class ReadData(Data):
@@ -283,6 +291,13 @@ class ReadData(Data):
             f'\t\tLow coverage:\t{self.amplicons_low_cov.sum()}\n' \
             f'\tAfter filtering: {self.df.shape[1]}\n'
         return out_str
+
+
+    def get_clusters(self, n_clusters):
+        Z = linkage(self.df.values, method='ward', metric='euclidean')
+        order = leaves_list(Z)
+        clusters = cut_tree(Z, n_clusters=n_clusters).flatten()
+        return self.df.index[order], clusters[order]
 
 
     # Normalize such that avg. healthy cells depth = 2
@@ -367,6 +382,7 @@ class SNPData(Data):
              + '>' + self.df_in.loc['ALT']
         self.SNPs.set_index(['CHR', 'POS'], inplace=True)
         df.columns = self.SNPs['full']
+        # row 4 = 'REGION' in input file
         self.SNP_ampl_map = {j: self.df_in.iloc[4, i] \
             for i, j in enumerate(self.SNPs['full'])}
         return df

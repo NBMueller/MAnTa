@@ -43,9 +43,7 @@ def get_annotation_elements(n_clusters, used_types=[]):
     Input('dropdown-patient', 'value')
 )
 def load_data(patient):
-    global data
-    data = TapestriDNA(datasets[patient]['reads'], datasets[patient]['SNPs'],
-        panel_file)
+    data.load_sample_data(datasets[patient]['reads'], datasets[patient]['SNPs'])
     out_file = data.get_out_file()
     return DEF_CLUSTERS, out_file
 
@@ -54,10 +52,11 @@ def load_data(patient):
     Output('graph', 'figure', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
     Input('input-n-clusters', 'value'),
+    Input('checklist-reads', 'value'),
     prevent_initial_call=True
 )
-def update_cluster_number(n_clusters):
-    data.update_cluster_number(n_clusters)
+def update_cluster_number(n_clusters, cl_reads):
+    data.update_cluster_number(n_clusters, cl_reads)
     fig = data.get_figure()
     annot_el = get_annotation_elements(n_clusters)
     return fig, annot_el
@@ -111,7 +110,7 @@ def get_datasets(in_dir):
         elif file.endswith('barcode.cell.distribution.merged.tsv'):
             datasets[prefix]['reads'] = file_full
         else:
-            raise IOError('Unknown input file: {file_full}')
+            print('! WARNING: unknown input file: {file_full} !')
     return datasets
 
 
@@ -124,7 +123,7 @@ def main(args):
         html.H1(children='Manual annotation', style={'textAlign':'center'}),
         html.Hr(),
         html.Div([
-            html.H4('Patient: ', style={'display':'inline-block',
+            html.H4('Sample: ', style={'display':'inline-block',
                 'margin-right': 10}),
             dcc.Dropdown(options=sorted(list(datasets.keys())), 
                 value=sorted(list(datasets.keys()))[0],
@@ -135,8 +134,9 @@ def main(args):
                 'margin-right': 10}),
             dcc.Input(id='input-n-clusters', type='number', 
                 placeholder='No. Clusters', value=DEF_CLUSTERS, min=1, max=30,
-                step=1, style={'width': '50px'})
-        ]),
+                step=1, style={'width': '50px'}),
+            dcc.Checklist(['Cluster based on reads'], id='checklist-reads')
+        ], style={'display': 'flex', 'align-items': 'center'}),
         html.Div([
             html.Div(id='div-assignment',
                 style={'display': 'flex', 'flex-wrap': 'wrap'}),
@@ -152,8 +152,8 @@ def main(args):
         html.Div(id='hidden-div', style={'display': 'none'})
     ])
 
-    global panel_file
-    panel_file = args.panel_file
+    global data
+    data = TapestriDNA(args.panel_file)
     app.run(debug=True)
 
 
@@ -170,8 +170,6 @@ def parse_args():
     parser.add_argument('-p', '--panel_file', type=str, 
         default='data/4387_annotated.bed',
         help='Tapestri panel bed file')
-    parser.add_argument('-o', '--output', type=str, default='',
-        help='Output directory. default = <DIR:SNP_FILE>')
     return parser.parse_args()
 
 
