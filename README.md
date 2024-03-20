@@ -23,7 +23,7 @@ python -m pip install -r requirements.txt
 
 ### Data
 Required files per sample stored in **one** input folder:
-- `{PREFIX}.barcode.cell.distribution.merged.tsv` file from `dna/results/tsv/ directory`
+- `{PREFIX}.barcode.cell.distribution.merged.tsv` file from `dna/results/tsv/` directory
 - `{PREFIX}.filtered_variants.csv` file from [`mosaic_preprocessing.py`](https://github.com/cbg-ethz/demoTape/blob/main/workflow/scripts/mosaic_preprocessing.py))
 
 Additionally required somewhere else:

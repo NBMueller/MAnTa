@@ -1,2 +1,4 @@
 dash
 pandas
+plotly
+scipy

@@ -38,23 +38,33 @@ def get_cluster_colors(n_clusters):
     colors = deepcopy(CLUSTER_COLORS_raw)
     return [(i, next(colors)) for i in np.linspace(0, 1, n_clusters)]
 
-
+# Discretized
+# CNV_COLORS = [
+#     (0.000, '#2f66c5'), # 0.0 - 0.5: Dark Blue 
+#     (0.083, '#2f66c5'), # 0.0 - 0.5: Dark Blue 
+#     (0.083, '#1b5fff'), # 0.0 - 0.5: Dark Blue 
+#     (0.250, '#1b5fff'), # 0.5 - 1.5: Light Blue
+#     (0.250, '#ffffff'), # 1.5 - 2.5: White
+#     (0.417, '#ffffff'), # 1.5 - 2.5: White
+#     (0.417, '#ff0000'), # 2.5 - 3.5: Red
+#     (0.583, '#ff0000'), # 2.5 - 3.5: Red
+#     (0.583, '#C60000'), # 3.5 - 4.5: Darker Red
+#     (0.725, '#C60000'), # 3.5 - 4.5: Darker Red
+#     (0.725, '#b90000'), # 4.5 - 5.5: Dark Red
+#     (0.917, '#b90000'), # 4.5 - 5.5: Dark Red
+#     (0.917, '#000000'), # 5.5 - 6: Black
+#     (1.000, '#000000'), # 5.5 - 6: Black
+# ]
 CNV_COLORS = [
-    (0.000, '#2f66c5'), # 0.0 - 0.5: Dark Blue 
-    (0.083, '#2f66c5'), # 0.0 - 0.5: Dark Blue 
-    (0.083, '#1b5fff'), # 0.0 - 0.5: Dark Blue 
-    (0.250, '#1b5fff'), # 0.5 - 1.5: Light Blue
-    (0.250, '#ffffff'), # 1.5 - 2.5: White
-    (0.417, '#ffffff'), # 1.5 - 2.5: White
-    (0.417, '#ff0000'), # 2.5 - 3.5: Red
-    (0.583, '#ff0000'), # 2.5 - 3.5: Red
-    (0.583, '#C60000'), # 3.5 - 4.5: Darker Red
-    (0.725, '#C60000'), # 3.5 - 4.5: Darker Red
-    (0.725, '#b90000'), # 4.5 - 5.5: Dark Red
-    (0.917, '#b90000'), # 4.5 - 5.5: Dark Red
-    (0.917, '#000000'), # 5.5 - 6: Black
+    (0.000, '#2f66c5'), # 0 - 1: Dark Blue 
+    (0.167, '#1b5fff'), # 1 - 2: Light Blue
+    (0.333, '#ffffff'), # 2 - 3: White
+    (0.500, '#ff0000'), # 3 - 4: Red
+    (0.666, '#C60000'), # 4 - 5: Darker Red
+    (0.833, '#b90000'), # 5 - 6: Dark Red
     (1.000, '#000000'), # 5.5 - 6: Black
 ]
+
 SNP_COLORS = [
     (0.000, '#ffffff'), # White
     (0.500, '#ff9d00'), # Yellow
@@ -275,8 +285,8 @@ class ReadData(Data):
         return out_str
 
 
+    # Normalize such that avg. healthy cells depth = 2
     def normalize_to_cluster(self, healthy_cells):
-        # Normalize such that avg. healthy cells depth = 2
         self.df = self.df.apply(lambda x: x / x.loc[healthy_cells].mean() * 2, axis=0)
 
 
@@ -357,7 +367,7 @@ class SNPData(Data):
              + '>' + self.df_in.loc['ALT']
         self.SNPs.set_index(['CHR', 'POS'], inplace=True)
         df.columns = self.SNPs['full']
-        self.SNP_ampl_map = {j: self.df_in.iloc[5, i] \
+        self.SNP_ampl_map = {j: self.df_in.iloc[4, i] \
             for i, j in enumerate(self.SNPs['full'])}
         return df
 
