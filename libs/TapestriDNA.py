@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from scipy.cluster.hierarchy import linkage, cut_tree, leaves_list
 from scipy.spatial.distance import pdist, euclidean
+from scipy.special import factorial
 from scipy.stats import kstest
 
 
@@ -55,6 +56,8 @@ def get_cluster_colors(n_clusters):
 #     (0.917, '#000000'), # 5.5 - 6: Black
 #     (1.000, '#000000'), # 5.5 - 6: Black
 # ]
+
+# Continuous
 CNV_COLORS = [
     (0.000, '#2f66c5'), # 0 - 1: Dark Blue 
     (0.167, '#1b5fff'), # 1 - 2: Light Blue
@@ -84,25 +87,27 @@ LIB_COLORS = [
 
 class TapestriDNA:
     def __init__(self, panel_file):
-        print(f'Loading panel from: {panel_file}')
+        print(f'\tpanel from: {panel_file}')
         self.panel = Panel(panel_file)
 
-
     def load_sample_data(self, read_file, SNP_file):
-        print(f'Loading SNPs  from: {SNP_file}')
+        print('Loading sample data')
+        print(f'\tSNPs  from: {SNP_file}')
         self.SNPs = SNPData(SNP_file)
-        print(f'Loading reads from: {read_file}')
-        self.reads = ReadData(read_file)
-
-        if self.reads.df.shape[0] != self.SNPs.df.shape[0]:
-            print('!Warning: Number of cells in read and SNP files do not match. '\
-                    'Taking only cells present in SNP data')
-            self.reads.df = self.reads.df.loc[self.SNPs.df.index]
-
         self.cells = pd.DataFrame(np.zeros(self.SNPs.df.shape[0]),
             index=self.SNPs.df.index, columns=['cluster'])
         self.cells.index.name = 'barcode'
         self.cells['assignmnet'] = 'unknown'
+
+        cell_order = self.get_cell_order()
+        print(f'\treads from: {read_file}')
+        self.reads = ReadData(read_file, cell_order)
+        self.depth = DepthData(read_file, cell_order)
+
+        if self.reads.df_in.shape[0] != self.SNPs.df.shape[0]:
+            print('!Warning: Number of cells in read and SNP files do not match. '\
+                    'Taking only cells present in SNP data')
+        print('Loading sample data - done')
 
 
     def safe_annotation(self):
@@ -116,14 +121,15 @@ class TapestriDNA:
         return os.path.join(read_dir, f'{prefix}_annotated.csv')
 
 
-    def update_cluster_number(self, n_clusters, cl_reads):
-        if cl_reads:
-            cells, clusters = self.reads.get_clusters(n_clusters)
-        else:
-            cells, clusters = self.SNPs.get_clusters(n_clusters)
-        self.cells = self.cells.loc[cells]
-        self.cells['cluster'] = clusters
-        
+    def update_cluster_number(self, n_clusters, snp_weight):
+        dist =  np.average(np.stack([self.SNPs.dist, self.reads.dist]), axis=0,
+            weights=[snp_weight, (1 - snp_weight)])
+        Z = linkage(dist, method='ward')
+        order = leaves_list(Z)
+        clusters = cut_tree(Z, n_clusters=n_clusters).flatten()
+
+        self.cells = self.cells.loc[self.SNPs.df.index[order]]
+        self.cells['cluster'] = clusters[order]
 
 
     def update_assignment(self, new_assignment, cl_types):
@@ -173,13 +179,14 @@ class TapestriDNA:
         )
         cell_order = self.get_cell_order()
 
+        hm_lib_size = self.depth.get_heatmap(cell_order)
+        hm_clusters = self.get_cluster_hm(cell_order)
+
         # First row
         hm_SNPs = self.SNPs.get_heatmap(cell_order)
         fig.append_trace(hm_SNPs, row=1, col=1)
-        hm_SNPs_lib_size = self.reads.get_libsize_hm(cell_order)
-        fig.append_trace(hm_SNPs_lib_size, row=1, col=2)
-        hm_SNPs_clusters = self.get_cluster_hm(cell_order)
-        fig.append_trace(hm_SNPs_clusters, row=1, col=3)
+        fig.append_trace(hm_lib_size, row=1, col=2)
+        fig.append_trace(hm_clusters, row=1, col=3)
         # Second row
         SNP_ampl = self.SNPs.get_amplicons().values
         hm_SNP_genes = self.panel.get_heatmap('Gene', SNP_ampl)
@@ -187,10 +194,8 @@ class TapestriDNA:
         # Third row
         hm_reads = self.reads.get_heatmap(cell_order)
         fig.append_trace(hm_reads, row=3, col=1)
-        hm_reads_lib_size = self.reads.get_libsize_hm(cell_order)
-        fig.append_trace(hm_reads_lib_size, row=3, col=2)
-        hm_reads_clusters = self.get_cluster_hm(cell_order)
-        fig.append_trace(hm_reads_clusters, row=3, col=3)
+        fig.append_trace(hm_lib_size, row=3, col=2)
+        fig.append_trace(hm_clusters, row=3, col=3)
         # Fourth row
         hm_reads_genes = self.panel.get_heatmap('Gene', self.reads.amplicons_good)
         fig.append_trace(hm_reads_genes, row=4, col=1)
@@ -227,28 +232,104 @@ class TapestriDNA:
 # ------------------------------------------------------------------------------
 
 class Data:
-    def __init__(self, in_file):
+    def __init__(self, in_file, cell_order=[]):
         self.in_file = in_file
-        self.df = self.load_data()
+        self.df = self.load_data(cell_order)
+        self.dist = self.get_pairwise_dists()
+        self.Z = self.get_Z()
 
 
-    def load_data(self, in_file):
+    def load_data(self, cell_order=[]):
         pass
+
+
+    def get_pairwise_dists(self, rel_cells=[]):
+        pass
+
+
+    def get_heatmap(self, order):
+        pass
+
+
+    def get_Z(self):
+        return linkage(self.dist, method='ward')
 
 
     def get_clusters(self, n_clusters):
-        pass
-
+        order = leaves_list(self.Z)
+        clusters = cut_tree(self.Z, n_clusters=n_clusters).flatten()
+        return self.df.index[order], clusters[order]
 
 # ------------------------------------------------------------------------------
 
-class ReadData(Data):
-    def __init__(self, in_file):
-        super().__init__(in_file)
-        
 
-    def load_data(self):
+class DepthData(Data):
+    def __init__(self, in_file, cell_order=[]):
+        super().__init__(in_file, cell_order)
+       
+
+
+    def load_data(self, cell_order=[]):
+        df_in = pd.read_csv(self.in_file, sep='\t', header=0, index_col=0)
+        if len(cell_order) > 0:
+            df_in = df_in.loc[cell_order]
+        # Get library depth per cell
+        df = np.log10(df_in.sum(axis=1)).to_frame(name='Library\nsize [log10]')
+        return df
+
+
+    def get_pairwise_dists(self, rel_cells=[]):
+        if len(rel_cells) == 0:
+            rel_cells = self.df.index.values
+
+        df = self.df.loc[rel_cells].values
+        dist = []
+
+        for i in np.arange(df.shape[0] - 1):
+            # Euclidean distance
+            dist.append(np.sqrt(np.sum((df[i] - df[i+1:])**2, axis=1)))
+        return np.concatenate(dist)
+
+
+    def get_heatmap(self, order):
+        hm = go.Heatmap(
+            z=self.df.loc[order],
+            y=order,
+            colorscale=LIB_COLORS,
+            showscale=False
+        )
+        return hm
+
+# ------------------------------------------------------------------------------
+
+
+class ReadData(Data):
+    def __init__(self, in_file, cell_order=[]):
+        super().__init__(in_file, cell_order)
+    
+
+    def __str__(self):
+        out_str = f'\nRead file: {self.in_file}:\n' \
+            'Amplicons:\n' \
+            f'\tTotal: {self.df_in.shape[1]}\n' \
+            f'\t\tNoisy:\t\t\t{self.amplicons_noisy.sum()}\n' \
+            f'\t\tLow coverage:\t{self.amplicons_low_cov.sum()}\n' \
+            f'\tAfter filtering: {self.df.shape[1]}\n'
+        return out_str
+
+
+    @staticmethod
+    def calc_gini(x):
+        total = 0
+        for i, xi in enumerate(x[:-1], 1):
+            total += np.sum(np.abs(xi - x[i:]))
+        return total / (len(x)**2 * np.mean(x))
+
+
+    def load_data(self, cell_order=[]):
         self.df_in = pd.read_csv(self.in_file, sep='\t', header=0, index_col=0)
+        if len(cell_order) > 0:
+            self.df_in = self.df_in.loc[cell_order]
 
         # Noisy amplicons (tapestri)
         gini = self.df_in.apply(lambda i: self.calc_gini(i.values))
@@ -270,7 +351,9 @@ class ReadData(Data):
         self.amplicons_good = ~(self.amplicons_noisy | self.amplicons_low_cov)
 
         df = df.loc[:,self.amplicons_good]
-        
+        self.df_cpm = (df * 1e6).round().astype(int) + 1
+        self.norm_const = np.arange(0, self.df_cpm.max().max() * 2) * np.log(2)
+
         # Remove outliers: clip data to 10% and 90% quantile
         df.clip(lower=df.quantile(0.1), upper=df.quantile(0.9), axis=1,
             inplace=True)
@@ -282,37 +365,31 @@ class ReadData(Data):
 
         return df
 
+    
+    def get_pairwise_dists(self, rel_cells=[]):
+        if len(rel_cells) == 0:
+            dp = self.df_cpm.values
+        else:
+            dp = self.df_cpm.loc[rel_cells].values
 
-    def __str__(self):
-        out_str = f'\nRead file: {self.in_file}:\n' \
-            'Amplicons:\n' \
-            f'\tTotal: {self.df_in.shape[1]}\n' \
-            f'\t\tNoisy:\t\t\t{self.amplicons_noisy.sum()}\n' \
-            f'\t\tLow coverage:\t{self.amplicons_low_cov.sum()}\n' \
-            f'\tAfter filtering: {self.df.shape[1]}\n'
-        return out_str
-
-
-    def get_clusters(self, n_clusters):
-        Z = linkage(self.df.values, method='ward', metric='euclidean')
-        order = leaves_list(Z)
-        clusters = cut_tree(Z, n_clusters=n_clusters).flatten()
-        return self.df.index[order], clusters[order]
+        dist = []
+        for i in np.arange(dp.shape[0] - 1):
+            valid = (dp[i] > 1) & (dp[i+1:] > 1)
+            dp_tot = dp[i] + dp[i+1:]
+            l12 = dp_tot / 2
+            logl = dp[i] * np.log(dp[i]) \
+                + dp[i+1:] * np.log(dp[i+1:]) \
+                - (dp_tot) * np.log(l12) \
+                + 2 * l12 - dp[i] - dp[i+1:]
+            norm = self.norm_const[dp_tot]
+            dist.append(np.sum(np.where(valid, logl / norm, 0), axis=1) \
+                / valid.sum(axis=1))
+        return np.concatenate(dist)
 
 
     # Normalize such that avg. healthy cells depth = 2
     def normalize_to_cluster(self, healthy_cells):
         self.df = self.df.apply(lambda x: x / x.loc[healthy_cells].mean() * 2, axis=0)
-
-
-    def get_libsize_hm(self, order):
-        hm = go.Heatmap(
-            z=self.lib_depth.loc[order],
-            y=order,
-            colorscale=LIB_COLORS,
-            showscale=False
-        )
-        return hm
 
 
     def get_heatmap(self, order):
@@ -338,40 +415,14 @@ class ReadData(Data):
         return hm
 
 
-    @staticmethod
-    def calc_gini(x):
-        total = 0
-        for i, xi in enumerate(x[:-1], 1):
-            total += np.sum(np.abs(xi - x[i:]))
-        return total / (len(x)**2 * np.mean(x))
-
-
 # ------------------------------------------------------------------------------
 
 class SNPData(Data):
-    def __init__(self, in_file): 
-        super().__init__(in_file)
-
-        # Init relevant data
-        self.ref = self.df.map(lambda x: int(x.split(':')[0]))
-        self.alt = self.df.map(lambda x: int(x.split(':')[1]))
-        self.dp = self.ref + self.alt
-        self.VAF = np.clip((self.alt + EPSILON) / (self.dp + EPSILON),
-            EPSILON, 1 - EPSILON)
-        self.RAF = 1 - self.VAF
-        self.norm_const = np.insert(
-            np.arange(1, self.dp.max().max() * 2 + 1) \
-                * np.log(np.arange(1, self.dp.max().max() * 2 + 1)),
-            0, np.nan)
-    
-        # Filter SNPs that are irrelevant for clustering
-        self.rel_SNPs = self.get_relevant_SNPS()
-
-        dist = self.get_pairwise_dists()
-        self.Z = np.clip(linkage(np.nan_to_num(dist, 0.5), method='ward'), 0, None)
+    def __init__(self, in_file, cell_order=[]): 
+        super().__init__(in_file, cell_order)
 
         
-    def load_data(self):
+    def load_data(self, cell_order=[]):
         self.df_in = pd.read_csv(self.in_file, dtype={'CHR': str}).T
 
         df = self.df_in.iloc[7:]
@@ -385,6 +436,21 @@ class SNPData(Data):
         # row 4 = 'REGION' in input file
         self.SNP_ampl_map = {j: self.df_in.iloc[4, i] \
             for i, j in enumerate(self.SNPs['full'])}
+
+         # Init relevant data
+        self.ref = df.map(lambda x: int(x.split(':')[0]))
+        self.alt = df.map(lambda x: int(x.split(':')[1]))
+        self.dp = self.ref + self.alt
+        self.VAF = np.clip((self.alt + EPSILON) / (self.dp + EPSILON),
+            EPSILON, 1 - EPSILON)
+        self.RAF = 1 - self.VAF
+        self.norm_const = np.insert(
+            np.arange(1, self.dp.max().max() * 2 + 1) \
+                * np.log(np.arange(1, self.dp.max().max() * 2 + 1)),
+            0, np.nan)
+    
+        # Filter SNPs that are irrelevant for clustering
+        self.rel_SNPs = self.get_relevant_SNPS()
         return df
 
 
@@ -450,12 +516,6 @@ class SNPData(Data):
 
             dist.append(np.nansum(logl / norm, axis=1) / valid.sum(axis=1))
         return np.concatenate(dist)
-   
-
-    def get_clusters(self, n_clusters):
-        order = leaves_list(self.Z)
-        clusters = cut_tree(self.Z, n_clusters=n_clusters).flatten()
-        return self.df.index[order], clusters[order]
 
 
     def get_amplicons(self):

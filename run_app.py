@@ -51,15 +51,16 @@ def load_data(patient):
 @callback(
     Output('graph', 'figure', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
+    Output('div-read-weight', 'children'),
     Input('input-n-clusters', 'value'),
-    Input('checklist-reads', 'value'),
+    Input('input-snp-weights', 'value'),
     prevent_initial_call=True
 )
-def update_cluster_number(n_clusters, cl_reads):
-    data.update_cluster_number(n_clusters, cl_reads)
+def update_cluster_number(n_clusters, snp_weight):
+    data.update_cluster_number(n_clusters, snp_weight)
     fig = data.get_figure()
     annot_el = get_annotation_elements(n_clusters)
-    return fig, annot_el
+    return fig, annot_el, f': {1 - snp_weight:.2f} - reads'
 
 
 @callback(
@@ -75,8 +76,20 @@ def update_cluster_assignment(n_clicks, assignments):
         for div_inner in div_outer['props']['children']:
             if div_inner['type'] == 'Dropdown':
                 cl = int(div_inner['props']['id'].split('-')[1])
-                cl_type = div_inner['props']['value']
+                try:
+                    cl_type = div_inner['props']['value']
+                except KeyError:
+                    # Cluster type never set
+                    cl_type == None
+                
+                # Cluster type set and then reset: None
+                if cl_type == None:
+                    continue
                 assign[cl] = cl_type
+
+    if len(assign) != len(assignments):
+        return data.get_figure(), assignments
+
     used_types = [i for i in CLUSTER_TYPES if i in assign.values()]
 
     data.update_assignment(assign, used_types)
@@ -118,6 +131,8 @@ def main(args):
     global datasets
     datasets = get_datasets(args.in_dir)
 
+    samples = sorted(list(datasets.keys()))
+    def_sample = samples[0]
     app = Dash(__name__)
     app.layout = html.Div([
         html.H1(children='Manual annotation', style={'textAlign':'center'}),
@@ -125,9 +140,8 @@ def main(args):
         html.Div([
             html.H4('Sample: ', style={'display':'inline-block',
                 'margin-right': 10}),
-            dcc.Dropdown(options=sorted(list(datasets.keys())), 
-                value=sorted(list(datasets.keys()))[0],
-                id=f'dropdown-patient', style={'width': '200px'})
+            dcc.Dropdown(options=samples, value=def_sample,
+                id='dropdown-patient', style={'width': '200px'})
         ], style={'display': 'flex', 'align-items': 'baseline'}),
         html.Div([
             html.H4('# Clusters: ', style={'display':'inline-block',
@@ -135,7 +149,14 @@ def main(args):
             dcc.Input(id='input-n-clusters', type='number', 
                 placeholder='No. Clusters', value=DEF_CLUSTERS, min=1, max=30,
                 step=1, style={'width': '50px'}),
-            dcc.Checklist(['Cluster based on reads'], id='checklist-reads')
+            html.Div([
+                html.H4('weights: ', style={'display':'inline-block',
+                'margin-right': 10, 'margin-left': 10}),
+                html.Div('SNPs - ', style={'margin-right': 3}),
+                dcc.Input(id='input-snp-weights', type='number', value=0.8,
+                    min=0, max=1, step=0.05, style={'width': '50px'}),
+                html.Div(': 0.5 - reads', id='div-read-weight'),
+            ], style={'display': 'flex', 'align-items': 'center'}),
         ], style={'display': 'flex', 'align-items': 'center'}),
         html.Div([
             html.Div(id='div-assignment',
