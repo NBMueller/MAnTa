@@ -21,8 +21,6 @@ PANEL_COLS = ['CHR', 'Start', 'End', 'Gene', 'Exon', 'Strand', 'Feature',
     'Biotype', 'Ensembl_ID', 'TSL', 'HUGO', 'Tx_overlap_%', 'Exon_overlaps_%', 
     'CDS_overlaps_%', 'Amplicon']
 
-# def rgb_to_hex(r, g, b, val=255):
-#     return '#{:02x}{:02x}{:02x}'.format(int(r * val), int(g * val), int(b * val))
 
 CHR_COLORS_raw = cycle(['#f4f4f4','#c3c4c3'])
 CHR_COLORS = [(i, next(CHR_COLORS_raw)) for i in np.linspace(0, 1, 24)]
@@ -35,9 +33,6 @@ GENE_COLORS = [(i, next(GENE_COLORS_raw)) for i in np.linspace(0, 1, GENE_MAX)]
 CLUSTER_COLORS_raw = cycle(['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c', '#fb9a99',
     '#e31a1c', '#fdbf6f', '#ff7f00', '#cab2d6', '#6a3d9a', '#ffff99', '#b15928'])
 
-def get_cluster_colors(n_clusters):
-    colors = deepcopy(CLUSTER_COLORS_raw)
-    return [(i, next(colors)) for i in np.linspace(0, 1, n_clusters)]
 
 # Discretized
 # CNV_COLORS = [
@@ -86,21 +81,23 @@ LIB_COLORS = [
 # ------------------------------------------------------------------------------
 
 class TapestriDNA:
-    def __init__(self, panel_file):
-        print(f'\tpanel from: {panel_file}')
-        self.panel = Panel(panel_file)
+    def __init__(self, panel):
+        self.panel = panel
+
 
     def load_sample_data(self, read_file, SNP_file):
-        print('Loading sample data')
-        print(f'\tSNPs  from: {SNP_file}')
+        self.prefix = os.path.basename(read_file).split('.barcode')[0]
+        self.out_dir, _ = os.path.split(read_file)
+        print(f'\nLoading sample {self.prefix}')
+        print(f'\tSNPs  file: {SNP_file}')
         self.SNPs = SNPData(SNP_file)
         self.cells = pd.DataFrame(np.zeros(self.SNPs.df.shape[0]),
             index=self.SNPs.df.index, columns=['cluster'])
         self.cells.index.name = 'barcode'
-        self.cells['assignmnet'] = 'unknown'
+        self.cells['assignment'] = 'unknown'
 
         cell_order = self.get_cell_order()
-        print(f'\treads from: {read_file}')
+        print(f'\treads rile: {read_file}')
         self.reads = ReadData(read_file, cell_order)
         self.depth = DepthData(read_file, cell_order)
 
@@ -116,9 +113,33 @@ class TapestriDNA:
 
 
     def get_out_file(self):
-        read_dir, read_file = os.path.split(self.reads.in_file)
-        prefix = read_file.split('.barcode')[0]
-        return os.path.join(read_dir, f'{prefix}_annotated.csv')
+        return os.path.join(self.out_dir, f'{self.prefix}_annotated.csv')
+
+
+    def get_cell_order(self):
+        return self.cells.index.values
+
+
+    def get_cluster_number(self):
+        return self.cells['cluster'].nunique()
+
+
+    def split_cluster(self, cl_id, snp_weight):
+        cl_cells = self.cells[self.cells['cluster'] == cl_id].index.values
+
+        SNP_dist = self.SNPs.get_pairwise_dists(cl_cells)
+        read_dist = self.reads.get_pairwise_dists(cl_cells)
+        dist = np.average(np.stack([SNP_dist, read_dist]), axis=0,
+            weights=[snp_weight, (1 - snp_weight)])
+        Z = linkage(dist, method='ward')
+        order = leaves_list(Z)
+        clusters = cut_tree(Z, n_clusters=2).flatten()
+
+        new_cl_id = self.get_cluster_number()
+        clusters = np.where(clusters, cl_id, new_cl_id)
+
+        self.cells.loc[cl_cells] = self.cells.loc[self.SNPs.df.index[order]]
+        self.cells.loc[cl_cells, 'cluster'] = clusters[order]
 
 
     def update_cluster_number(self, n_clusters, snp_weight):
@@ -132,17 +153,17 @@ class TapestriDNA:
         self.cells['cluster'] = clusters[order]
 
 
-    def update_assignment(self, new_assignment, cl_types):
-        self.cells['assignmnet'] = self.cells['cluster'].map(new_assignment)
-        clType_int_map = {j:i for i,j in enumerate(cl_types)}
-        assign_int_map = {i: clType_int_map[j] for i,j in new_assignment.items()}
+    def update_assignment(self, new_assignment, cl_clType_map):
+        self.cells['assignment'] = self.cells['cluster'].map(new_assignment)
+        clType_cl_map = {j: i for i, j in cl_clType_map.items()}
+        assign_int_map = {i: clType_cl_map[j] for i, j in new_assignment.items()}
 
         self.cells['cluster'] = self.cells['cluster'].map(assign_int_map)
 
         new_order = []
         idx_min = 0
-        for cl_type in cl_types:
-            cells = self.cells[self.cells['assignmnet'] == cl_type].index.values
+        for cl_type in cl_clType_map.values():
+            cells = self.cells[self.cells['assignment'] == cl_type].index.values
             dist = self.SNPs.get_pairwise_dists(cells)
             Z = linkage(dist, method='ward')
             new_order.extend(cells[leaves_list(Z)])
@@ -150,13 +171,9 @@ class TapestriDNA:
 
         self.cells = self.cells.loc[new_order]
 
-        healthy_cells = self.cells[self.cells['assignmnet'] == 'healthy']\
+        healthy_cells = self.cells[self.cells['assignment'] == 'healthy']\
             .index.values
         self.reads.normalize_to_cluster(healthy_cells)
-
-
-    def get_cell_order(self):
-        return self.cells.index.values
 
 
     def get_figure(self):
@@ -222,10 +239,16 @@ class TapestriDNA:
             z=self.cells[['cluster']],
             x=['Clusters'],
             y=order,
-            colorscale=get_cluster_colors(self.cells['cluster'].nunique()),
+            colorscale=self.get_cluster_colors(),
             showscale=False
         )
         return hm
+
+
+    def get_cluster_colors(self):
+        colors = deepcopy(CLUSTER_COLORS_raw)
+        val_range = np.linspace(0, 1, self.get_cluster_number())
+        return [(i, next(colors)) for i in val_range]
 
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
@@ -267,7 +290,6 @@ class DepthData(Data):
     def __init__(self, in_file, cell_order=[]):
         super().__init__(in_file, cell_order)
        
-
 
     def load_data(self, cell_order=[]):
         df_in = pd.read_csv(self.in_file, sep='\t', header=0, index_col=0)
@@ -553,6 +575,7 @@ class SNPData(Data):
 
 class Panel:
     def __init__(self, in_file):
+        print(f'Loading panel from: {in_file}')
         self.df = self.load_panel(in_file)
         
 
@@ -604,8 +627,10 @@ if __name__ == '__main__':
     read_file = 'data/G12958/G12958.barcode.cell.distribution.merged.tsv'
     snp_file = 'data/G12958/G12958.filtered_variants.csv'
     panel_file = 'data/4387_annotated.bed'
+    panel = Panel(panel_file)
 
-    data = TapestriDNA(read_file, snp_file, panel_file)
+    data = TapestriDNA(panel)
+    data.load_sample_data(read_file, snp_file)
     data.update_cluster_number(3)
     fig = data.get_figure()
     fig.show()
