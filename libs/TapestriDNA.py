@@ -105,6 +105,11 @@ class TapestriDNA:
             print('!Warning: Number of cells in read and SNP files do not match. '\
                     'Taking only cells present in SNP data')
         print('Loading sample data - done')
+        # Init functions for efficiently calculating joint dist
+        self.dist_joint = np.stack([self.SNPs.dist, self.reads.dist], axis=1)
+        cells1m = self.cells.shape[0] - 1
+        self.cell_start_id = np.array([sum(range(cells1m, cells1m - i, -1)) \
+            for i in range(cells1m + 1)])
 
 
     def safe_annotation(self):
@@ -124,16 +129,36 @@ class TapestriDNA:
         return self.cells['cluster'].nunique()
 
 
-    def split_cluster(self, cl_id, snp_weight):
-        cl_cells = self.cells[self.cells['cluster'] == cl_id].index.values
+    def get_dist_cell_ids(self, cells):
+        cl_cell_ids = self.SNPs.df.index.get_indexer(cells)
+        
+        dist_ids = []
+        for i, cl_cell_id in enumerate(cl_cell_ids):
+            start_id = np.where(cl_cell_ids > cl_cell_id,
+                self.cell_start_id[cl_cell_id], self.cell_start_id[cl_cell_ids])
+            new_ids = (start_id +  np.abs(cl_cell_ids - cl_cell_id) - 1)[i+1:]
+            dist_ids.append(new_ids)
+        return np.concatenate(dist_ids)
 
-        SNP_dist = self.SNPs.get_pairwise_dists(cl_cells)
-        read_dist = self.reads.get_pairwise_dists(cl_cells)
-        dist = np.average(np.stack([SNP_dist, read_dist]), axis=0,
-            weights=[snp_weight, (1 - snp_weight)])
+
+    def update_HCA(self, snp_weight, n_clusters=0, cells=[]):
+        if len(cells) > 0:
+            dist_in = self.dist_joint[self.get_dist_cell_ids(cells)]
+        else:
+            dist_in = self.dist_joint
+        dist = np.average(dist_in, axis=1, weights=[snp_weight, (1 - snp_weight)])
         Z = linkage(dist, method='ward')
         order = leaves_list(Z)
-        clusters = cut_tree(Z, n_clusters=2).flatten()
+        if n_clusters:
+            clusters = cut_tree(Z, n_clusters=n_clusters).flatten()
+            return order, clusters
+        else:
+            return order
+
+
+    def split_cluster(self, cl_id, snp_weight):
+        cl_cells = self.cells[self.cells['cluster'] == cl_id].index.values
+        order, clusters = self.update_HCA(snp_weight, 2, cl_cells)
 
         new_cl_id = self.get_cluster_number()
         clusters = np.where(clusters, cl_id, new_cl_id)
@@ -143,17 +168,13 @@ class TapestriDNA:
 
 
     def update_cluster_number(self, n_clusters, snp_weight):
-        dist =  np.average(np.stack([self.SNPs.dist, self.reads.dist]), axis=0,
-            weights=[snp_weight, (1 - snp_weight)])
-        Z = linkage(dist, method='ward')
-        order = leaves_list(Z)
-        clusters = cut_tree(Z, n_clusters=n_clusters).flatten()
+        order, clusters = self.update_HCA(snp_weight, n_clusters)
 
         self.cells = self.cells.loc[self.SNPs.df.index[order]]
         self.cells['cluster'] = clusters[order]
 
 
-    def update_assignment(self, new_assignment, cl_clType_map):
+    def update_assignment(self, new_assignment, cl_clType_map, snp_weight):
         self.cells['assignment'] = self.cells['cluster'].map(new_assignment)
         clType_cl_map = {j: i for i, j in cl_clType_map.items()}
         assign_int_map = {i: clType_cl_map[j] for i, j in new_assignment.items()}
@@ -163,11 +184,10 @@ class TapestriDNA:
         new_order = []
         idx_min = 0
         for cl_type in cl_clType_map.values():
-            cells = self.cells[self.cells['assignment'] == cl_type].index.values
-            dist = self.SNPs.get_pairwise_dists(cells)
-            Z = linkage(dist, method='ward')
-            new_order.extend(cells[leaves_list(Z)])
-            idx_min += cells.size
+            cl_cells = self.cells[self.cells['assignment'] == cl_type].index.values
+            order = self.update_HCA(snp_weight, cells=cl_cells)
+            new_order.extend(cl_cells[order])
+            idx_min += cl_cells.size
 
         self.cells = self.cells.loc[new_order]
 
@@ -301,16 +321,21 @@ class DepthData(Data):
 
 
     def get_pairwise_dists(self, rel_cells=[]):
-        if len(rel_cells) == 0:
-            rel_cells = self.df.index.values
+        # if len(rel_cells) == 0:
+        #     rel_cells = self.df.index.values
 
-        df = self.df.loc[rel_cells].values
-        dist = []
+        # df = self.df.loc[rel_cells].values
+        # dist = []
 
-        for i in np.arange(df.shape[0] - 1):
-            # Euclidean distance
-            dist.append(np.sqrt(np.sum((df[i] - df[i+1:])**2, axis=1)))
-        return np.concatenate(dist)
+        # for i in np.arange(df.shape[0] - 1):
+        #     # Euclidean distance
+        #     dist.append(np.sqrt(np.sum((df[i] - df[i+1:])**2, axis=1)))
+        # return np.concatenate(dist)
+        pass
+
+
+    def get_Z(self):
+        pass
 
 
     def get_heatmap(self, order):
@@ -394,15 +419,16 @@ class ReadData(Data):
         else:
             dp = self.df_cpm.loc[rel_cells].values
 
+        dp_fct = dp * np.log(dp)
+
         dist = []
         for i in np.arange(dp.shape[0] - 1):
             valid = (dp[i] > 1) & (dp[i+1:] > 1)
             dp_tot = dp[i] + dp[i+1:]
             l12 = dp_tot / 2
-            logl = dp[i] * np.log(dp[i]) \
-                + dp[i+1:] * np.log(dp[i+1:]) \
+            logl = dp_fct[i] + dp_fct[i+1:] \
                 - (dp_tot) * np.log(l12) \
-                + 2 * l12 - dp[i] - dp[i+1:]
+                + 2 * l12 - dp_tot
             norm = self.norm_const[dp_tot]
             dist.append(np.sum(np.where(valid, logl / norm, 0), axis=1) \
                 / valid.sum(axis=1))

@@ -165,11 +165,12 @@ def update_cluster_number(n_clusters, snp_weight):
     Output('graph', 'figure', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
     Input('button-apply', 'n_clicks'),
+    State('input-snp-weights', 'value'),
     State('div-assignment', 'children'),
     State('graph', 'figure'),
     prevent_initial_call=True
 )
-def update_cluster_assignments(n_clicks, assignments, old_fig):
+def update_cluster_assignments(n_clicks, snp_weight, assignments, old_fig):
     assign = {}
     for dd in get_assignment_dropdown(assignments):
         cl = int(dd['props']['id'].split('-')[1])
@@ -181,7 +182,7 @@ def update_cluster_assignments(n_clicks, assignments, old_fig):
     used_cl_types = [i for i in CLUSTER_TYPES if i in assign.values()]
     new_cl = {i: j for i, j in enumerate(used_cl_types)}
 
-    data.update_assignment(assign, new_cl)
+    data.update_assignment(assign, new_cl, snp_weight)
     new_fig = data.get_figure()
     new_assign = get_annotation_elements(new_cl)
 
@@ -250,12 +251,14 @@ def safe_assignment(n_clicks):
 def open_model(clicked, n_clusters):
     colors = data.get_cluster_colors()
     cluster = clicked['points'][0]['z']
+    if not isinstance(cluster, int):
+        return False, {}, ''
     header_style={
         'height': '20px',
         'width': '30px',
         'margin-right': '5px',
         'display': 'inline-block',
-        'background-color':colors[cluster][1]
+        'background-color': colors[cluster][1]
     }
     title = f'Cluster {cluster} - type'
     return True, header_style, title
