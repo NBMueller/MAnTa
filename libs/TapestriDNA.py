@@ -95,14 +95,16 @@ class TapestriDNA:
         print(f'\nLoading sample {self.prefix}')
         print(f'\tSNPs  file: {SNP_file}')
         self.SNPs = SNPData(SNP_file)
-        self.cells = pd.DataFrame(np.zeros(self.SNPs.df.shape[0]),
-            index=self.SNPs.df.index, columns=['cluster'])
+        self.SNPs.add_panel_info(self.panel)
+        self.cells = pd.DataFrame(np.zeros((self.SNPs.df.shape[0], 2)),
+            index=self.SNPs.df.index, columns=['cluster', 'assignment'], 
+            dtype=int)
+        self.cells['assignment'] = self.cells['assignment'].astype(str)
         self.cells.index.name = 'barcode'
-        self.cells['assignment'] = 'unknown'
 
         cell_order = self.get_cell_order()
-        print(f'\treads rile: {read_file}')
         self.reads = ReadData(read_file, cell_order)
+        self.reads.add_panel_info(self.panel)
         self.depth = DepthData(read_file, cell_order)
 
         if self.reads.df_in.shape[0] != self.SNPs.df.shape[0]:
@@ -145,6 +147,10 @@ class TapestriDNA:
         return np.concatenate(dist_ids)
 
 
+    def update_dist_join(self):
+        self.dist_joint = np.stack([self.SNPs.dist, self.reads.dist], axis=1)
+
+
     def update_HCA(self, snp_weight, n_clusters=0, cells=[]):
         if len(cells) > 0:
             dist_in = self.dist_joint[self.get_dist_cell_ids(cells)]
@@ -171,11 +177,24 @@ class TapestriDNA:
         self.cells.loc[cl_cells, 'cluster'] = clusters[order]
 
 
-    def update_cluster_number(self, n_clusters, snp_weight):
+    def update_SNP_rel(self, SNP, new_val, snp_weight, n_clusters):
+        self.SNPs.set_SNP_rel(SNP, new_val)
+        self.SNPs.update_pairwise_dists()
+        self.update_dist_join()
         order, clusters = self.update_HCA(snp_weight, n_clusters)
 
         self.cells = self.cells.loc[self.SNPs.df.index[order]]
         self.cells['cluster'] = clusters[order]
+
+
+    def update_clustering(self, n_clusters, snp_weight):
+        order, clusters = self.update_HCA(snp_weight, n_clusters)
+
+        self.cells = self.cells.loc[self.SNPs.df.index[order]]
+        self.cells['cluster'] = clusters[order]
+        not_set = self.cells['assignment'].astype(str).str.len() < 3
+        self.cells.loc[not_set, 'assignment'] = self.cells.loc[not_set, 'cluster']
+        self.cells.loc[~not_set, 'assignment'] = self.cells.loc[~not_set, 'assignment']
 
 
     def update_assignment(self, new_assignment, cl_clType_map, snp_weight):
@@ -203,7 +222,7 @@ class TapestriDNA:
     def get_figure(self):
         fig = make_subplots(rows=6,
             cols=3,
-            row_heights=[0.03, 0.42, 0.03, 0.42, 0.03, 0.03],
+            row_heights=[0.02, 0.42, 0.03, 0.42, 0.03, 0.03],
             vertical_spacing=0.00,
             column_widths=[0.9, 0.05, 0.05],
             horizontal_spacing=0.00,
@@ -239,8 +258,7 @@ class TapestriDNA:
         fig.update_yaxes(title_text='Cells', row=2, col=1)
         # Third row
         row = 3
-        SNP_ampl = self.SNPs.get_amplicons().values
-        hm_SNP_genes = self.panel.get_heatmap('Gene', SNP_ampl)
+        hm_SNP_genes = self.panel.get_heatmap('Gene', self.SNPs.get_amplicons())
         fig.append_trace(hm_SNP_genes, row=row, col=1)
         fig.update_yaxes(title_text='Gene', tickangle=90, row=row, col=1)
         # Fourth row
@@ -270,10 +288,15 @@ class TapestriDNA:
 
 
     def get_cluster_hm(self, order):
+        text = self.cells.apply(lambda x:
+            f'cluster: {x.assignment}<br>barcode: {x.name}', axis=1).to_frame()
+
         hm = go.Heatmap(
             z=self.cells[['cluster']],
-            x=['Clusters'],
+            x=['cluster'],
             y=order,
+            hoverinfo='text',
+            text=text,
             colorscale=self.get_cluster_colors(),
             showscale=False
         )
@@ -309,6 +332,10 @@ class Data:
         pass
 
 
+    def update_pairwise_dists(self, rel_cells=[]):
+        self.dist = self.get_pairwise_dists(rel_cells)
+
+
     def get_Z(self):
         return linkage(self.dist, method='ward')
 
@@ -316,6 +343,7 @@ class Data:
     def get_clusters(self, n_clusters):
         order = leaves_list(self.Z)
         clusters = cut_tree(self.Z, n_clusters=n_clusters).flatten()
+        self.cells.loc[order, 'assignment'] = clusters[order]
         return self.df.index[order], clusters[order]
 
 # ------------------------------------------------------------------------------
@@ -324,14 +352,19 @@ class Data:
 class DepthData(Data):
     def __init__(self, in_file, cell_order=[]):
         super().__init__(in_file, cell_order)
-       
+        self.text = self.df.apply(lambda x:
+            f'Library size [log10]: {x.lib_size:.2f} (abs: {x.lib_size**10:.2e})'\
+                f'<br>barcode: {x.name}',
+            axis=1
+        ).to_frame()
+
 
     def load_data(self, cell_order=[]):
         df_in = pd.read_csv(self.in_file, sep='\t', header=0, index_col=0)
         if len(cell_order) > 0:
             df_in = df_in.loc[cell_order]
         # Get library depth per cell
-        df = np.log10(df_in.sum(axis=1)).to_frame(name='Library\nsize [log10]')
+        df = np.log10(df_in.sum(axis=1)).to_frame(name='lib_size')
         return df
 
 
@@ -356,7 +389,10 @@ class DepthData(Data):
     def get_heatmap(self, order):
         hm = go.Heatmap(
             z=self.df.loc[order],
+            x=['Library size'],
             y=order,
+            hoverinfo='text',
+            text=self.text.loc[order],
             colorscale=LIB_COLORS,
             showscale=False
         )
@@ -411,7 +447,7 @@ class ReadData(Data):
 
         # Filter bad amplicons
         self.amplicons_good = ~(self.amplicons_noisy | self.amplicons_low_cov)
-        df = df.loc[:,self.amplicons_good]
+        df = df.loc[:, self.amplicons_good]
 
         # Remove outliers: clip data to 10% and 90% quantile
         df.clip(lower=None, upper=df.quantile(0.9), axis=1, inplace=True)
@@ -426,7 +462,20 @@ class ReadData(Data):
         # Normalize such that avg. cell depth = 2
         df = df.apply(lambda x: x / x.mean() * 2, axis=0)
 
+        self.meta = pd.DataFrame([], index=df.columns)
+
         return df
+
+
+    def add_panel_info(self, panel):
+        self.meta = pd.merge(self.meta,
+                panel.df[['Gene', 'CHR', 'chrArm', 'ampl_per_gene']],
+            left_index=True, right_index=True)
+
+        self.meta['text'] = self.meta.apply(lambda x:
+            f'{x.name}<br>Gene: {x.Gene} ({x.ampl_per_gene} ampl.)<br>' \
+                f'Chrom. Arm: {x.CHR}{x.chrArm}',
+            axis=1)
 
     
     def get_pairwise_dists(self, rel_cells=[]):
@@ -461,7 +510,7 @@ class ReadData(Data):
             z=np.clip(self.df.loc[order], 0, 6),
             zmin=0,
             zmax=6,
-            x=self.df.columns,
+            x=self.meta['text'],
             y=order,
             colorscale=CNV_COLORS,
             colorbar={
@@ -491,16 +540,14 @@ class SNPData(Data):
 
         df = self.df_in.iloc[7:]
 
-        self.SNPs = self.df_in.loc[['CHR', 'POS']].T
-        self.SNPs['full'] = self.df_in.loc['CHR'].str.replace('chr', '') + ':' \
+        self.meta = self.df_in.loc[['CHR', 'POS']].T
+        self.meta['full'] = self.df_in.loc['CHR'].str.replace('chr', '') + ':' \
             + self.df_in.loc['POS'].astype(str) + ' ' + self.df_in.loc['REF'] \
-             + '>' + self.df_in.loc['ALT']
-        self.SNPs.set_index(['CHR', 'POS'], inplace=True)
-        df.columns = self.SNPs['full']
-        # row 4 = 'REGION' in input file
-        self.SNP_ampl_map = {j: self.df_in.iloc[4, i] \
-            for i, j in enumerate(self.SNPs['full'])}
-
+            + '>' + self.df_in.loc['ALT']
+        self.meta.set_index(['CHR', 'POS'], inplace=True)
+        df.columns = self.meta['full']
+        # row 4|'NAME' in input file = amplicon
+        self.meta['amplicon'] = self.df_in.loc['NAME'].values
          # Init relevant data
         self.ref = df.map(lambda x: int(x.split(':')[0]))
         self.alt = df.map(lambda x: int(x.split(':')[1]))
@@ -516,14 +563,34 @@ class SNPData(Data):
             0, np.nan)
     
         # Filter SNPs that are irrelevant for clustering
-        self.rel_SNPs = self.get_relevant_SNPS()
+        self.rel_SNPs = self.init_relevant_SNPS()
         return df
 
+    def add_panel_info(self, panel):
+        self.meta = pd.merge(self.meta,
+                panel.df[['Gene', 'chrArm', 'ampl_per_gene']],
+            left_on='amplicon', right_index=True, how='left')
+        
+        self.meta['text'] = self.meta.apply(lambda x:
+            f'{x.full}<br>Amplicon: {x.amplicon}<br>' \
+                f'Gene: {x.Gene} ({x.ampl_per_gene} ampl.)<br>' \
+                f'Chrom. Arm: {x.name[0]}{x.chrArm}',
+            axis=1)
 
-    def get_relevant_SNPS(self):
+
+    def set_SNP_rel(self, SNP, new_val):
+        self.rel_SNPs.loc[SNP, 'is_rel'] = new_val
+        if 'manual' in self.rel_SNPs.loc[SNP, 'reason']:
+            self.rel_SNPs.loc[SNP, 'reason'] = self.rel_SNPs.loc[SNP, 'reason'] \
+                .replace('manual;', '')
+        else:
+            self.rel_SNPs.loc[SNP, 'reason'] += 'manual;'
+
+
+    def init_relevant_SNPS(self):
         # Identify SNPs that are symmetric/normal distributed: likely germline + ADO
         # Not informative for clustering
-        rel_SNPs = pd.Series(True, index=self.SNPs['full'].values, name='is_rel') \
+        rel_SNPs = pd.Series(True, index=self.meta['full'].values, name='is_rel') \
             .to_frame()
         rel_SNPs['reason'] = ''
  
@@ -536,7 +603,7 @@ class SNPData(Data):
 
         # Identify SNPs that are on the same read in most/all cells and remove 
         #   one of them from clustering
-        for chrom, chrom_SNPs in self.SNPs.groupby('CHR'):
+        for chrom, chrom_SNPs in self.meta.groupby('CHR'):
             if chrom_SNPs.size < 2:
                 continue
             pos = chrom_SNPs.index.get_level_values('POS').values
@@ -547,8 +614,8 @@ class SNPData(Data):
 
             for SNP2_chrom_id in same_read_SNP:
                 # Get row index in full data
-                SNP1 = self.SNPs.loc[chrom_SNPs.index[SNP2_chrom_id - 1]]['full']
-                SNP2 = self.SNPs.loc[chrom_SNPs.index[SNP2_chrom_id]]['full']
+                SNP1 = self.meta.loc[chrom_SNPs.index[SNP2_chrom_id - 1]]['full']
+                SNP2 = self.meta.loc[chrom_SNPs.index[SNP2_chrom_id]]['full']
                 
                 # Calculate euclidean distance between VAF profiles
                 valid = ~np.isnan(self.VAF[SNP1]) & ~np.isnan(self.VAF[SNP2])
@@ -566,7 +633,6 @@ class SNPData(Data):
         wt = (self.VAF.mean() < 0.01) & (self.VAF.isna().mean() < 0.05)
         rel_SNPs.loc[wt, 'is_rel'] = False
         rel_SNPs.loc[wt, 'reason'] += 'wildtype;'
-
         return rel_SNPs
 
 
@@ -601,18 +667,16 @@ class SNPData(Data):
 
 
     def get_amplicons(self):
-        return self.SNPs['full'].map(self.SNP_ampl_map)
+        return self.meta['amplicon']
 
 
     def get_heatmap(self, order):
-        ampl = self.get_amplicons()
-
         hm = go.Heatmap(
-            z=self.VAF.loc[order],
+            z=self.VAF.loc[order].round(2), # VAF
             zmin=0,
             zmax=1,
-            x=self.SNPs['full'] + '<br>' + ampl,
-            y=order,
+            x=self.meta['text'], # SNPs
+            y=order, # cells
             colorscale=SNP_COLORS,
             colorbar={ 
                 'title': 'VAF',
@@ -632,12 +696,15 @@ class SNPData(Data):
         return hm
 
     def get_relevant_SNP_heatmap(self):
+        text = self.meta['text'] + '<br><br>reason: ' \
+                + self.rel_SNPs['reason'].str.rstrip(';').values
+
         hm = go.Heatmap(
-            z=self.rel_SNPs[['is_rel']].astype(int).T.values,
+            z=self.rel_SNPs.loc[:, ['is_rel']].T.astype(int), # relevance
+            x = text, # SNPs
+            y = ['SNP'],
             zmin=0,
             zmax=1,
-            hoverinfo='text',
-            text=self.rel_SNPs['reason'].str.rstrip(';').to_frame().T.values,
             colorscale=REL_COLORS,
             showscale=False
         )
@@ -652,6 +719,12 @@ class Panel:
     def __init__(self, in_file):
         print(f'Loading panel from: {in_file}')
         self.df = self.load_panel(in_file)
+        # Add amplicons per gene column
+        ampl_per_gene = self.df.groupby('Gene').apply(lambda x: x.shape[0])
+        self.df['ampl_per_gene'] =  self.df['Gene'].map(ampl_per_gene)
+        self.df['text'] = self.df.apply(lambda x:
+            f'{x.name}<br>Gene: {x.Gene} ({x.ampl_per_gene} ampl.)<br>',
+            axis=1)
         self._chrArm = False
         
 
@@ -676,11 +749,8 @@ class Panel:
         self.df['chrArm'] = self.df['Gene'].map(ga['arm'].to_dict())
         self._chrArm = True
 
-
-    def get_amplicon_idx(self):
-        ampl_order = self.df.rename(df['locus'].to_dict(), axis=1).columns.values
-        return sorted(range(self.df.shape[1]),
-            key=lambda i:(CHR_ORDER[ampl_order[i].split(':')[0]], i))
+        self.df['text'] = self.df['text'] + 'Chrom. Arm: ' \
+            + self.df.apply(lambda x: f'{x.CHR}{x.chrArm}', axis=1)
      
 
     def get_heatmap(self, col, good_ampl):
@@ -691,21 +761,17 @@ class Panel:
             colors = CHR_COLORS
             zmax = 24
 
+        # Map gene/chr to int values for coloring
         int_map = {j: i for i,j in enumerate(self.df.loc[:, col].unique())}
-        z = self.df.loc[good_ampl, col].map(int_map).to_frame().T
-        if self._chrArm:
-            map_fct = lambda x: \
-                f'{x["Gene"]}<br>chr{x["CHR"]}{x["chrArm"]}<br>{x.name}'
-        else:
-            map_fct = lambda x: f'{x["Gene"]}<br>chr{x["CHR"]}<br>{x.name}'
+        z = self.df.loc[good_ampl, col].map(int_map)
 
-        text = self.df.loc[good_ampl].apply(map_fct, axis=1).to_frame().T
         hm = go.Heatmap(
-            z=z.values,
+            z=np.expand_dims(z, axis=0),
             zmin=0,
             zmax=zmax,
+            y=[col],
             hoverinfo='text',
-            text=text.values,
+            text=np.expand_dims(self.df.loc[good_ampl, 'text'], axis=0),
             colorscale=colors,
             showscale=False
         )
@@ -725,6 +791,6 @@ if __name__ == '__main__':
 
     data = TapestriDNA(panel)
     data.load_sample(read_file, snp_file)
-    data.update_cluster_number(3)
+    data.update_clustering(3, 0.75)
     fig = data.get_figure()
     fig.show()

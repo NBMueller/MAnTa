@@ -19,22 +19,43 @@ DEF_CLUSTER_TYPES = ['doublets', 'healthy']
 # ------------------------------- HTML LAYOUT ----------------------------------
 
 
-modal = html.Div([
+modals = html.Div([
     dbc.Modal([
+        dcc.Input(id='modal-cluster-input', type='text',
+            style={'display': 'none'}
+        ),
         dbc.ModalHeader([
-            html.Div(id='modal-color'),
-            dbc.ModalTitle(id='modal-title')
+            html.Div(id='modal-cluster-color'),
+            dbc.ModalTitle(id='modal-cluster-title')
         ]),
         dbc.ModalBody(
             [
-            dcc.Dropdown(DEF_CLUSTER_TYPES + ['tumor 1'], id='model-dropdown',
+            dcc.Dropdown(DEF_CLUSTER_TYPES + ['tumor 1'], id='modal-cluster-dropdown',
                 style={'width': '120px'}),
-            html.Button('Split cluster', id='modal-split', n_clicks=0)
+            html.Button('Split cluster', id='modal-cluster-split', n_clicks=0)
             ],
             style={'display': 'flex', 'justify-content': 'space-around'}),
-        dbc.ModalFooter(dbc.Button('Close', id='modal-close', className='ms-auto')),
+        dbc.ModalFooter(dbc.Button('Close', id='modal-cluster-close',
+            className='ms-auto')),
         ],
         id='modal-cluster', is_open=False,
+    ),
+    dbc.Modal([
+        dcc.Input(id='modal-SNP-input', type='text', style={'display': 'none'}
+        ),
+        dbc.ModalHeader([
+            dbc.ModalTitle('Relevant SNP:')
+        ]),
+        dbc.ModalBody(
+            [
+            dcc.Dropdown(['True', 'False'], id='modal-SNP-dropdown',
+                style={'width': '120px'}),
+            ],
+            style={'display': 'flex', 'justify-content': 'space-around'}),
+        dbc.ModalFooter(dbc.Button('Close', id='modal-SNP-close',
+            className='ms-auto')),
+        ],
+        id='modal-SNP', is_open=False,
     ),
 ])
 
@@ -86,7 +107,7 @@ html_layout = dbc.Container(
         html.Hr(),
         dcc.Graph(id='graph', style={'height': '100vh'}),
         html.Div(id='hidden-div', style={'display': 'none'}),
-        modal
+        modals
     ],
     style={'margin-left': 0, 'margin-right': 0, 'max-width': '100vw'},
 )
@@ -184,15 +205,18 @@ def load_data(sample):
     State('input-n-clones', 'value'),
     State('input-snp-weights', 'value'),
     State('dropdown-sample', 'value'),
-    State('button-apply', 'n_clicks'),
     prevent_initial_call=True
 )
-def update_cluster_number(n_clusters, n_clones, snp_weight, sample, apply_clicks):
-    if apply_clicks > APPLY_CNT[-1]:
-        APPLY_CNT.append(apply_clicks)
-
+def update_cluster_number(n_clusters, n_clones, snp_weight, sample):
+    # Dont trigger if cluster assignment applied
+    if CL_UPDATE_FLAG['apply']:
+        CL_UPDATE_FLAG['apply'] = False
         raise PreventUpdate
-    data[sample].update_cluster_number(n_clusters, snp_weight)
+    # Dont trigger if cluster split
+    if CL_UPDATE_FLAG['split']:
+        CL_UPDATE_FLAG['split'] = False
+        raise PreventUpdate
+    data[sample].update_clustering(n_clusters, snp_weight)
     fig = data[sample].get_figure()
     cl_options = get_annotation_options(n_clones)
     annot_el = get_annotation_elements(sample, cl_options)
@@ -201,14 +225,19 @@ def update_cluster_number(n_clusters, n_clones, snp_weight, sample, apply_clicks
 
 @callback(
     Output('div-assignment', 'children', allow_duplicate=True),
-    Output('model-dropdown', 'options', allow_duplicate=True),
+    Output('modal-cluster-dropdown', 'options', allow_duplicate=True),
     Input('input-n-clones', 'value'),
+    State('div-assignment', 'children'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def update_clone_number(n_clones, sample):
+def update_clone_number(n_clones, assignments, sample):
+    assign = {}
+    for dd in get_assignment_dropdown(assignments):
+        cl = int(dd['props']['id'].split('-')[1])
+        assign[cl] = dd['props']['value']
     cl_options = get_annotation_options(n_clones)
-    annot_el = get_annotation_elements(sample, cl_options)
+    annot_el = get_annotation_elements(sample, cl_options, assignment=assign)
     return annot_el, cl_options
 
 
@@ -221,7 +250,7 @@ def update_clone_number(n_clones, sample):
     prevent_initial_call=True
 )
 def update_weight(snp_weight, n_clusters, sample):
-    data[sample].update_cluster_number(n_clusters, snp_weight)
+    data[sample].update_clustering(n_clusters, snp_weight)
     fig = data[sample].get_figure()
     return fig, f': {1 - snp_weight:.2f} - reads'
 
@@ -258,15 +287,16 @@ def update_cluster_assignments(n_clicks, n_clones, snp_weight,
     new_assign = get_annotation_elements(sample, cl_options, assignment=new_cl)
     new_cl_total = data[sample].get_cluster_number()
 
+    CL_UPDATE_FLAG['apply'] = True
     return new_fig, new_assign, new_cl_total
 
 
 @callback(
     Output('modal-cluster', 'is_open', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
-    Output('model-dropdown', 'value', allow_duplicate=True),
-    Input('model-dropdown', 'value'),
-    State('modal-title', 'children'),
+    Output('modal-cluster-dropdown', 'value', allow_duplicate=True),
+    Input('modal-cluster-dropdown', 'value'),
+    State('modal-cluster-title', 'children'),
     State('div-assignment', 'children'),
     prevent_initial_call=True
 )
@@ -280,12 +310,36 @@ def set_cluster_assignment(cl_type, title, assignments):
 
 
 @callback(
+    Output('modal-SNP', 'is_open', allow_duplicate=True),
+    Output('graph', 'figure', allow_duplicate=True),
+    Input('modal-SNP-dropdown', 'value'),
+    State('modal-SNP-input','value'),
+    State('input-snp-weights', 'value'),
+    State('input-n-clusters', 'value'),
+    State('dropdown-sample', 'value'),
+    prevent_initial_call=True
+)
+def set_SNP_relevant(val, SNP_raw, snp_weight, n_clusters, sample):
+    if not SNP_raw:
+        raise PreventUpdate
+    SNP, old_val = SNP_raw.split('|')
+    # Do nothing if value stays the same
+    if (val == 'False' and old_val == '0') \
+            or (val == 'True' and old_val == '1'):
+        raise PreventUpdate
+    new_val = True if val == 'True' else False
+    data[sample].update_SNP_rel(SNP, new_val, snp_weight, n_clusters)
+    fig = data[sample].get_figure()
+    return False, fig
+
+
+@callback(
     Output('modal-cluster', 'is_open', allow_duplicate=True),
     Output('graph', 'figure', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
     Output('input-n-clusters', 'value', allow_duplicate=True),
-    Input('modal-split', 'n_clicks'),
-    State('modal-title', 'children'),
+    Input('modal-cluster-split', 'n_clicks'),
+    State('modal-cluster-title', 'children'),
     State('input-n-clones', 'value'),
     State('input-snp-weights', 'value'),
     State('div-assignment', 'children'),
@@ -303,6 +357,8 @@ def split_cluster(n, title, n_clones, snp_weight, assignments, sample):
     cl_options = get_annotation_options(n_clones)
     new_assign_el = get_new_assignment_dropdown_div(new_cl_id, new_color, cl_options)
     assignments.append(new_assign_el)
+
+    CL_UPDATE_FLAG['split'] = True
     return False, fig, assignments, new_cl_total
 
 
@@ -318,18 +374,34 @@ def safe_assignment(n_clicks, sample):
 
 
 @callback(
-    Output('modal-cluster', 'is_open'),
-    Output('modal-color', 'style'),
-    Output('modal-title', 'children'),
+    Output('modal-cluster-input', 'value'),
+    Output('modal-SNP-input', 'value'),
     Input('graph','clickData'),
+    prevent_initial_call=True
+)
+def open_modal(clicked_raw):
+    clicked = clicked_raw['points'][0]
+    if clicked['x'] == 'cluster':
+        return clicked['z'], ''
+    elif clicked['y'] == 'SNP':
+        SNP = clicked['x'].split('<br>')[0]
+        return '', f'{SNP}|{clicked["z"]}'
+    else:
+        return '', ''
+
+
+@callback(
+    Output('modal-cluster', 'is_open'),
+    Output('modal-cluster-color', 'style'),
+    Output('modal-cluster-title', 'children'),
+    Input('modal-cluster-input','value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def open_model(clicked, sample):
-    colors = data[sample].get_cluster_colors()
-    cluster = clicked['points'][0]['z']
-    if not isinstance(cluster, int):
+def open_cluster_modal(cluster, sample):
+    if cluster == '':
         return False, {}, ''
+    colors = data[sample].get_cluster_colors()
     header_style={
         'height': '20px',
         'width': '30px',
@@ -341,13 +413,31 @@ def open_model(clicked, sample):
     return True, header_style, title
 
 
-@ callback(
-    Output('modal-cluster', 'is_open', allow_duplicate=True),
-    Input('modal-close', 'n_clicks'),
+@callback(
+    Output('modal-SNP', 'is_open'),
+    Output('modal-SNP-dropdown', 'value'),
+    Input('modal-SNP-input','value'),
+    State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def close_modal(n_clicks):
-    return False
+def open_SNP_modal(SNP, sample):
+    if not SNP:
+        return False, ''
+    if SNP.split('|')[1] == '0':
+        return True, 'False'
+    else:
+        return True, 'True'
+
+
+@ callback(
+    Output('modal-cluster', 'is_open', allow_duplicate=True),
+    Output('modal-SNP', 'is_open', allow_duplicate=True),
+    Input('modal-cluster-close', 'n_clicks'),
+    Input('modal-SNP-close', 'n_clicks'),
+    prevent_initial_call=True
+)
+def close_modal(n1, n2):
+    return False, False
 
 
 # ------------------------------------------------------------------------------
@@ -397,15 +487,15 @@ def main(args):
 
     # If multiple cores are available:
     #   Load all data async except first sample (which is loaded when app is called)
-    cores = min(args.cores, cpu_count())
-    if cores > 1:
-        with Pool(processes=cores - 1) as pool:
-            for sample in samples[1:]:
-                pool.apply_async(load_sample, (sample,))
+    # cores = min(args.cores, cpu_count())
+    # if cores > 1:
+    #     with Pool(processes=cores - 1) as pool:
+    #         for sample in samples[1:]:
+    #             pool.apply_async(load_sample, (sample,))
 
     # Set tracker to count apply button clicks (to prevent callback)
-    global APPLY_CNT
-    APPLY_CNT = [0]
+    global CL_UPDATE_FLAG
+    CL_UPDATE_FLAG = {'apply': False, 'split': False}
 
     # Run dash app
     app.run(debug=True)
