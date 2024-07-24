@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 
+"""Dash app for manually annotating MissionBio scDNA-seq panel data."""
+
+# Standard libs
 import argparse
 from multiprocessing import Pool, cpu_count
 import os
-
-from libs.TapestriDNA import TapestriDNA, Panel
-
+# Third-party libs
 import dash_bootstrap_components as dbc
-from dash import Dash, html, dcc, callback, Output, Input, State, ctx
+from dash import Dash, html, dcc, callback, Output, Input, State
 from dash.exceptions import PreventUpdate
+# First-party libs
+from libs.TapestriDNA import TapestriDNA, Panel
+import libs.preprocessing as prep
 
 
 DEF_CLUSTERS = 3
 DEF_SNP_WEIGHT = 0.8
 DEF_CLUSTER_TYPES = ['doublets', 'healthy']
+
+panel = Panel()
+datasets = {}
+data = {}
+cl_update_flag = {'apply': False, 'split': False}
 
 
 # ------------------------------- HTML LAYOUT ----------------------------------
@@ -41,21 +50,21 @@ modals = html.Div([
         id='modal-cluster', is_open=False,
     ),
     dbc.Modal([
-        dcc.Input(id='modal-SNP-input', type='text', style={'display': 'none'}
+        dcc.Input(id='modal-snp-input', type='text', style={'display': 'none'}
         ),
         dbc.ModalHeader([
             dbc.ModalTitle('Relevant SNP:')
         ]),
         dbc.ModalBody(
             [
-            dcc.Dropdown(['True', 'False'], id='modal-SNP-dropdown',
+            dcc.Dropdown(['True', 'False'], id='modal-snp-dropdown',
                 style={'width': '120px'}),
             ],
             style={'display': 'flex', 'justify-content': 'space-around'}),
-        dbc.ModalFooter(dbc.Button('Close', id='modal-SNP-close',
+        dbc.ModalFooter(dbc.Button('Close', id='modal-snp-close',
             className='ms-auto')),
         ],
-        id='modal-SNP', is_open=False,
+        id='modal-snp', is_open=False,
     ),
 ])
 
@@ -69,23 +78,28 @@ html_layout = dbc.Container(
             dcc.Dropdown(#options=samples, value=def_sample,
                 id='dropdown-sample', style={'width': '200px'}),
             html.Div([
-                html.Button('Save annotation', id='button-safe', 
+                html.Button('Save annotation', id='button-safe',
                     style={'margin-right': 10}),
                 html.Div(id='div-output'),
             ], style={'display':'flex', 'align-items': 'center'}),
+            dcc.Checklist(
+               options={'True': ' show non-relevant SNPs/reads'},
+               value=['True'],
+               id='checklist-relevant'
+            )
         ], style={'display': 'flex', 'align-items': 'baseline', 'gap': '20px'}),
         html.Div([
             html.Div([
                 html.H4('# Clusters: ', style={'display':'inline-block',
                     'margin-right': 10}),
-                dcc.Input(id='input-n-clusters', type='number', 
+                dcc.Input(id='input-n-clusters', type='number',
                     placeholder='No. Clusters', value=DEF_CLUSTERS, min=1, max=30,
                     step=1, style={'width': '50px'}),
                 ]),
             html.Div([
                 html.H4('# Tumor clones: ', style={'display':'inline-block',
                     'margin-right': 10}),
-                dcc.Input(id='input-n-clones', type='number', 
+                dcc.Input(id='input-n-clones', type='number',
                     placeholder='No. Clones', value=1, min=1, max=10,
                     step=1, style={'width': '50px'}),
                 ]),
@@ -116,36 +130,62 @@ html_layout = dbc.Container(
 # ----------------------------- HELPER FUNCTIONS -------------------------------
 
 
-def get_datasets(in_dir):
-    datasets = {}
+def get_dataset_files(in_dir):
     for file in os.listdir(in_dir):
-        file_full = os.path.join(args.in_dir, file)
+        file_full = os.path.join(in_dir, file)
         prefix = file.split('.')[0]
+        if not prefix in datasets:
+            datasets[prefix] = {}
         if file.endswith('variants.csv') and not 'relevant' in file:
-            try:
-                datasets[prefix]['SNPs'] = file_full
-            except KeyError:
-                datasets[prefix] = {'SNPs': file_full}
+            datasets[prefix]['snps'] = file_full
         elif file.endswith('barcode.cell.distribution.merged.tsv'):
-            try:
-                datasets[prefix]['reads'] = file_full
-            except KeyError:
-                datasets[prefix] = {'reads': file_full}
+            datasets[prefix]['reads'] = file_full
+        elif file == f'{prefix}.cells.loom':
+            datasets[prefix]['loom'] = file_full
+        elif file == f'{prefix}.dna.h5':
+            datasets[prefix]['h5'] = file_full
         else:
             print(f'! WARNING: unknown input file: {file}')
             continue
 
-    return datasets
+
+    del_keys = []
+    for sample, sample_files in datasets.items():
+        if len(sample_files) == 0:
+            del_keys.append(sample)
+        elif 'snps' in sample_files and 'reads' in sample_files:
+            datasets[sample]['loading'] = 'preprocessed'
+        elif 'h5' in sample_files:
+            datasets[sample]['loading'] = 'h5'
+        elif 'loom' in sample_files and 'reads' in sample_files:
+            datasets[sample]['loading'] = 'raw'
+        else:
+            del_keys.append(sample)
+            print(f'Cannot extract SNPs and reads for {sample} from files: ' \
+                f'{sample_files}')
+
+    for del_key in del_keys:
+        del datasets[del_key]
 
 
 def load_sample(sample):
     if not sample in data:
-        new_data = TapestriDNA(panel)
-        new_data.load_sample(datasets[sample]['reads'], datasets[sample]['SNPs'])
+        if datasets[sample]['loading'] == 'preprocessed':
+            sample_reads = datasets[sample]['reads']
+            sample_snps = datasets[sample]['snps']
+        elif datasets[sample]['loading'] == 'raw':
+            sample_reads = datasets[sample]['reads']
+            sample_snps = prep.preprocess_data(datasets[sample]['loom'])
+        elif datasets[sample]['loading'] == 'h5':
+           sample_snps, sample_reads = prep.preprocess_data(datasets[sample]['h5'])
+
+        new_data = TapestriDNA(panel, sample_reads, sample_snps)
         data[sample] = new_data
 
 
-def get_annotation_elements(sample, options, assignment={}):
+def get_annotation_elements(sample, options, assignment=None):
+    if assignment is None:
+        assignment = {}
     el = []
     colors = data[sample].get_cluster_colors()
     for cl in range(data[sample].get_cluster_number()):
@@ -158,10 +198,10 @@ def get_annotation_elements(sample, options, assignment={}):
 
 def get_new_assignment_dropdown_div(cl, color, options):
     new_el = html.Div([
-        html.Div(style={'height': '15px', 'width': '30px', 
+        html.Div(style={'height': '15px', 'width': '30px',
             'display': 'inline-block', 'background-color': color}),
         html.H4(f'{cl}: ', style={'display':'inline-block',
-            'margin-left': 10, 'margin-right': 10, 'margin-top': 0, 
+            'margin-left': 10, 'margin-right': 10, 'margin-top': 0,
             'margin-bottom': 0, 'color': color}),
         dcc.Dropdown(options, value=None, id=f'dropdown-{cl}',
             style={'width': '120px'})
@@ -200,24 +240,43 @@ def load_data(sample):
 
 @callback(
     Output('graph', 'figure', allow_duplicate=True),
+    Input('checklist-relevant', 'value'),
+    State('dropdown-sample', 'value'),
+    prevent_initial_call=True
+)
+def toggle_relevant(show_all, sample):
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
+        
+    return fig
+
+
+@callback(
+    Output('graph', 'figure', allow_duplicate=True),
     Output('div-assignment', 'children', allow_duplicate=True),
     Input('input-n-clusters', 'value'),
     State('input-n-clones', 'value'),
     State('input-snp-weights', 'value'),
+    State('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def update_cluster_number(n_clusters, n_clones, snp_weight, sample):
+def update_cluster_number(n_clusters, n_clones, snp_weight, show_all, sample):
     # Dont trigger if cluster assignment applied
-    if CL_UPDATE_FLAG['apply']:
-        CL_UPDATE_FLAG['apply'] = False
+    if cl_update_flag['apply']:
+        cl_update_flag['apply'] = False
         raise PreventUpdate
     # Dont trigger if cluster split
-    if CL_UPDATE_FLAG['split']:
-        CL_UPDATE_FLAG['split'] = False
+    if cl_update_flag['split']:
+        cl_update_flag['split'] = False
         raise PreventUpdate
     data[sample].update_clustering(n_clusters, snp_weight)
-    fig = data[sample].get_figure()
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
     cl_options = get_annotation_options(n_clones)
     annot_el = get_annotation_elements(sample, cl_options)
     return fig, annot_el
@@ -246,12 +305,16 @@ def update_clone_number(n_clones, assignments, sample):
     Output('div-read-weight', 'children'),
     Input('input-snp-weights', 'value'),
     State('input-n-clusters', 'value'),
+    State('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def update_weight(snp_weight, n_clusters, sample):
+def update_weight(snp_weight, n_clusters, show_all, sample):
     data[sample].update_clustering(n_clusters, snp_weight)
-    fig = data[sample].get_figure()
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
     return fig, f': {1 - snp_weight:.2f} - reads'
 
 
@@ -263,32 +326,35 @@ def update_weight(snp_weight, n_clusters, sample):
     State('input-n-clones', 'value'),
     State('input-snp-weights', 'value'),
     State('div-assignment', 'children'),
+    State('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     State('graph', 'figure'),
     prevent_initial_call=True
 )
-def update_cluster_assignments(n_clicks, n_clones, snp_weight,
-            assignments, sample, old_fig):
+def update_cluster_assignments(_, n_clones, snp_weight, assignments, show_all,
+        sample, old_fig):
     assign = {}
     for dd in get_assignment_dropdown(assignments):
         cl = int(dd['props']['id'].split('-')[1])
         assign[cl] = dd['props']['value']
 
-    if any([i == None for i in assign.values()]):
+    if None in assign.values():
         return old_fig, assignments
 
     cl_options = get_annotation_options(n_clones)
-    used_cl_types = [i for i in cl_options if i in assign.values()]
-    new_cl = {i: j for i, j in enumerate(used_cl_types)}
+    new_cl = dict(enumerate([i for i in cl_options if i in assign.values()]))
 
     data[sample].update_assignment(assign, new_cl, snp_weight)
-    new_fig = data[sample].get_figure()
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
 
     new_assign = get_annotation_elements(sample, cl_options, assignment=new_cl)
     new_cl_total = data[sample].get_cluster_number()
 
-    CL_UPDATE_FLAG['apply'] = True
-    return new_fig, new_assign, new_cl_total
+    cl_update_flag['apply'] = True
+    return fig, new_assign, new_cl_total
 
 
 @callback(
@@ -310,26 +376,30 @@ def set_cluster_assignment(cl_type, title, assignments):
 
 
 @callback(
-    Output('modal-SNP', 'is_open', allow_duplicate=True),
+    Output('modal-snp', 'is_open', allow_duplicate=True),
     Output('graph', 'figure', allow_duplicate=True),
-    Input('modal-SNP-dropdown', 'value'),
-    State('modal-SNP-input','value'),
+    Input('modal-snp-dropdown', 'value'),
+    State('modal-snp-input','value'),
     State('input-snp-weights', 'value'),
     State('input-n-clusters', 'value'),
+    State('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def set_SNP_relevant(val, SNP_raw, snp_weight, n_clusters, sample):
-    if not SNP_raw:
+def set_snp_relevant(val, snp_raw, snp_weight, n_clusters, show_all, sample):
+    if not snp_raw:
         raise PreventUpdate
-    SNP, old_val = SNP_raw.split('|')
+    snp, old_val = snp_raw.split('|')
     # Do nothing if value stays the same
     if (val == 'False' and old_val == '0') \
             or (val == 'True' and old_val == '1'):
         raise PreventUpdate
-    new_val = True if val == 'True' else False
-    data[sample].update_SNP_rel(SNP, new_val, snp_weight, n_clusters)
-    fig = data[sample].get_figure()
+    new_val = val == 'True'
+    data[sample].update_snp_rel(snp, new_val, snp_weight, n_clusters)
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
     return False, fig
 
 
@@ -343,13 +413,17 @@ def set_SNP_relevant(val, SNP_raw, snp_weight, n_clusters, sample):
     State('input-n-clones', 'value'),
     State('input-snp-weights', 'value'),
     State('div-assignment', 'children'),
+    State('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def split_cluster(n, title, n_clones, snp_weight, assignments, sample):
+def split_cluster(_, title, n_clones, snp_weight, assignments, show_all, sample):
     cl_id = int(title.split(' ')[1])
     data[sample].split_cluster(cl_id, snp_weight)
-    fig = data[sample].get_figure()
+    if show_all:
+        fig = data[sample].get_figure(True)
+    else:
+        fig = data[sample].get_figure(False)
     # Update assignment
     new_cl_total = data[sample].get_cluster_number()
     new_cl_id = new_cl_total  - 1
@@ -358,7 +432,7 @@ def split_cluster(n, title, n_clones, snp_weight, assignments, sample):
     new_assign_el = get_new_assignment_dropdown_div(new_cl_id, new_color, cl_options)
     assignments.append(new_assign_el)
 
-    CL_UPDATE_FLAG['split'] = True
+    cl_update_flag['split'] = True
     return False, fig, assignments, new_cl_total
 
 
@@ -368,14 +442,13 @@ def split_cluster(n, title, n_clones, snp_weight, assignments, sample):
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
-def safe_assignment(n_clicks, sample):
+def safe_assignment(_, sample):
     data[sample].safe_annotation()
-    return
 
 
 @callback(
     Output('modal-cluster-input', 'value'),
-    Output('modal-SNP-input', 'value'),
+    Output('modal-snp-input', 'value'),
     Input('graph','clickData'),
     prevent_initial_call=True
 )
@@ -383,11 +456,10 @@ def open_modal(clicked_raw):
     clicked = clicked_raw['points'][0]
     if clicked['x'] == 'cluster':
         return clicked['z'], ''
-    elif clicked['y'] == 'SNP':
-        SNP = clicked['x'].split('<br>')[0]
-        return '', f'{SNP}|{clicked["z"]}'
-    else:
-        return '', ''
+    if clicked['y'] == 'snp':
+        snp = clicked['x'].split('<br>')[0]
+        return '', f'{snp}|{clicked["z"]}'
+    return '', ''
 
 
 @callback(
@@ -414,57 +486,53 @@ def open_cluster_modal(cluster, sample):
 
 
 @callback(
-    Output('modal-SNP', 'is_open'),
-    Output('modal-SNP-dropdown', 'value'),
-    Input('modal-SNP-input','value'),
-    State('dropdown-sample', 'value'),
+    Output('modal-snp', 'is_open'),
+    Output('modal-snp-dropdown', 'value'),
+    Input('modal-snp-input','value'),
     prevent_initial_call=True
 )
-def open_SNP_modal(SNP, sample):
-    if not SNP:
+def open_snp_modal(snp):
+    if not snp:
         return False, ''
-    if SNP.split('|')[1] == '0':
+    if snp.split('|')[1] == '0':
         return True, 'False'
-    else:
-        return True, 'True'
+    return True, 'True'
 
 
 @ callback(
     Output('modal-cluster', 'is_open', allow_duplicate=True),
-    Output('modal-SNP', 'is_open', allow_duplicate=True),
+    Output('modal-snp', 'is_open', allow_duplicate=True),
     Input('modal-cluster-close', 'n_clicks'),
-    Input('modal-SNP-close', 'n_clicks'),
+    Input('modal-snp-close', 'n_clicks'),
     prevent_initial_call=True
 )
-def close_modal(n1, n2):
+def close_modal(*_):
     return False, False
 
 
 # ------------------------------------------------------------------------------
 
 
-def main(args):
+def main(args_in):
     # Load panel
-    global panel
-    panel = Panel(args.panel_file)
-    if args.gene_annotation:
-        if os.path.isfile(args.gene_annotation):
-            panel.add_chrArm(args.gene_annotation)
+    panel.load(args_in.panel_file)
+    if args_in.gene_annotation:
+        if os.path.isfile(args_in.gene_annotation):
+            panel.add_chr_arm(args_in.gene_annotation)
         else:
-            print(f'!Warning: Gene annotation file {args.gene_annotation} '\
+            print(f'!Warning: Gene annotation file {args_in.gene_annotation} '\
                 'does not exist.')
 
     # Load datasets
-    global datasets
-    datasets = get_datasets(args.in_dir)
-    
+    get_dataset_files(args_in.in_dir)
+
     # Add samples to dropdown menu in html layout
     samples = sorted(list(datasets.keys()))
     html_layout.children[2].children[1].options = samples
     html_layout.children[2].children[1].value = samples[0]
 
     # Check if correct panel file is loaded for the (first) sample(s)
-    with open(datasets[samples[0]]['reads'], 'r') as f:
+    with open(datasets[samples[0]]['reads'], 'r', encoding='utf-8') as f:
         reads_header = f.readline()
     ampl = reads_header.strip().split('\t')[1:]
     assert len(set(panel.df.index) - set(ampl)) == 0, \
@@ -482,20 +550,13 @@ def main(args):
     app.layout = html_layout
 
     # Load sample data
-    global data
-    data = {}
-
     # If multiple cores are available:
     #   Load all data async except first sample (which is loaded when app is called)
-    # cores = min(args.cores, cpu_count())
+    # cores = min(args_in.cores, cpu_count())
     # if cores > 1:
     #     with Pool(processes=cores - 1) as pool:
     #         for sample in samples[1:]:
     #             pool.apply_async(load_sample, (sample,))
-
-    # Set tracker to count apply button clicks (to prevent callback)
-    global CL_UPDATE_FLAG
-    CL_UPDATE_FLAG = {'apply': False, 'split': False}
 
     # Run dash app
     app.run(debug=True)
@@ -511,7 +572,7 @@ def parse_args():
         help='Reads per barcode distribution from Tapestri processing (.tsv).')
     parser.add_argument('-snps', '--snp_file', type=str,
         help='Variant file from mosaic preprocessing (.csv).')
-    parser.add_argument('-p', '--panel_file', type=str, 
+    parser.add_argument('-p', '--panel_file', type=str,
         default='data/4387_annotated.bed',
         help='Annotated Tapestri panel bed file')
     parser.add_argument('-ga', '--gene_annotation', type=str,
