@@ -147,18 +147,20 @@ def get_dataset_files(in_dir):
         else:
             print(f'! WARNING: unknown input file: {file}')
             continue
+    add_loading_option_to_datasets()
 
 
+def add_loading_option_to_datasets():
     del_keys = []
     for sample, sample_files in datasets.items():
         if len(sample_files) == 0:
             del_keys.append(sample)
         elif 'snps' in sample_files and 'reads' in sample_files:
-            datasets[sample]['loading'] = 'preprocessed'
+            sample_files['loading'] = 'preprocessed'
         elif 'h5' in sample_files:
-            datasets[sample]['loading'] = 'h5'
+            sample_files['loading'] = 'h5'
         elif 'loom' in sample_files and 'reads' in sample_files:
-            datasets[sample]['loading'] = 'raw'
+            sample_files['loading'] = 'raw'
         else:
             del_keys.append(sample)
             print(f'Cannot extract SNPs and reads for {sample} from files: ' \
@@ -170,14 +172,14 @@ def get_dataset_files(in_dir):
 
 def load_sample(sample):
     if not sample in data:
-        if datasets[sample]['loading'] == 'preprocessed':
-            sample_reads = datasets[sample]['reads']
-            sample_snps = datasets[sample]['snps']
-        elif datasets[sample]['loading'] == 'raw':
+        if datasets[sample]['loading'] == 'raw':
             sample_reads = datasets[sample]['reads']
             sample_snps = prep.preprocess_data(datasets[sample]['loom'])
         elif datasets[sample]['loading'] == 'h5':
-           sample_snps, sample_reads = prep.preprocess_data(datasets[sample]['h5'])
+            sample_snps, sample_reads = prep.preprocess_data(datasets[sample]['h5'])
+        else:
+            sample_reads = datasets[sample]['reads']
+            sample_snps = datasets[sample]['snps']
 
         new_data = TapestriDNA(panel, sample_reads, sample_snps)
         data[sample] = new_data
@@ -249,7 +251,6 @@ def toggle_relevant(show_all, sample):
         fig = data[sample].get_figure(True)
     else:
         fig = data[sample].get_figure(False)
-        
     return fig
 
 

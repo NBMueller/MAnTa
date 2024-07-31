@@ -218,9 +218,9 @@ class TapestriDNA:
 
     def get_figure(self, show_all=True):
         fig_new = make_subplots(
-            rows=7,
+            rows=6,
             cols=3,
-            row_heights=[0.02, 0.42, 0.03, 0.02, 0.42, 0.02, 0.01],
+            row_heights=[0.02, 0.42, 0.04, 0.02, 0.42, 0.02],
             vertical_spacing=0.00,
             column_widths=[0.95, 0.025, 0.025],
             horizontal_spacing=0.00,
@@ -230,12 +230,11 @@ class TapestriDNA:
             specs=[
                 [{'r': 0.01},{'r': 0.01},{}],
                 [{'r': 0.01},{'r': 0.01},{'r': 0.01}],
-                [{'r': 0.01, 'b':0.01},{'r': 0.01},{}],
+                [{'r': 0.01, 'b':0.02},{'r': 0.01},{}],
                 # -------------------------------------
                 [{'r': 0.01},{'r': 0.01},{}],
                 [{'r': 0.01},{'r': 0.01},{'r': 0.01}],
                 [{'r': 0.01},{'r': 0.01},{}],
-                [{'r': 0.01},{'r': 0.01},{}]
             ]
         )
         cell_order = self.get_cell_order()
@@ -257,10 +256,12 @@ class TapestriDNA:
         fig_new.update_yaxes(title_text='Cells', row=2, col=1)
         # Third row
         row = 3
-        hm_snps_genes = self.panel.get_heatmap('Gene',
-            self.snps.get_amplicons(show_all))
+        snp_ampl = self.snps.get_amplicons(show_all)
+        hm_snps_genes = self.panel.get_heatmap('Gene', snp_ampl)
         fig_new.append_trace(hm_snps_genes, row=row, col=1)
         fig_new.update_yaxes(title_text='Gene', tickangle=90, row=row, col=1)
+
+        self.add_chr_vlines(fig_new, snp_ampl, row)
         # ----------------------------------------------------------------------
         # Fourth row
         row = 4
@@ -274,20 +275,19 @@ class TapestriDNA:
         fig_new.append_trace(hm_lib_size, row=row, col=2)
         fig_new.append_trace(hm_clusters, row=row, col=3)
         fig_new.update_yaxes(title_text='Cells', row=row, col=1)
+
         # Sixths row
         if show_all:
             read_ampl = self.reads.meta.index.values
         else:
             read_ampl = self.reads.meta[self.reads.meta['is_rel']].index.values
+
         row = 6
         hm_reads_genes = self.panel.get_heatmap('Gene', read_ampl)
         fig_new.append_trace(hm_reads_genes, row=row, col=1)
         fig_new.update_yaxes(title_text='Gene', row=row, col=1)
-        # Sevenths row
-        row = 7
-        hm_reads_chrom = self.panel.get_heatmap('CHR', read_ampl)
-        fig_new.append_trace(hm_reads_chrom, row=row, col=1)
-        # fig_new.update_yaxes(title_text='Chr', row=row, col=1)
+
+        self.add_chr_vlines(fig_new, read_ampl, row)
 
         # Turn of x and y tick labels
         for fig_new_l in fig_new['layout']:
@@ -295,6 +295,44 @@ class TapestriDNA:
                 fig_new['layout'][fig_new_l].showticklabels = False
 
         return fig_new
+
+
+    def add_chr_vlines(self, fig, ampl, row_no, last_n_rows=3):
+        chr_all = []
+        ampl_chr = []
+        ampl_arm = []
+        for chrom, chr_ampl in self.panel.df.loc[ampl].groupby('CHR', sort=False):
+            chr_all.append(chrom)
+            ampl_chr.append(chr_ampl.shape[0])
+            ampl_arm.append((chr_ampl['chr_arm'] == 'p').sum())
+
+        # Dont show last vline; subtract 0.5 to be on line with heatmap
+        chr_x = np.cumsum(ampl_chr[:-1]) - 0.5
+        for i, x in enumerate(chr_x):
+            # Add to last 3 plots
+            for j in range(last_n_rows):
+                fig.add_vline(x, row=row_no - j, col=1, line_color='black',
+                    line_width=2)
+                if j == last_n_rows - 1:
+                    if i == 0:
+                        x_annot = ampl_chr[i]/ 2 - 0.5
+                    else:
+                        x_annot = chr_x[i-1] + ampl_chr[i] / 2
+                    fig.add_annotation(
+                        x=x_annot, y=0, yshift=15, 
+                        text=chr_all[i], showarrow=False,
+                        row=row_no - j, col=1)
+
+                # Chr Arm lines
+                if ampl_arm[i] > 0 and ampl_chr[i] != ampl_arm[i]:
+                    fig.add_vline(chr_x[i - 1] + ampl_arm[i], row=row_no - j,
+                        col=1, line_color='#c3c4c3', line_width=2)
+        # Add last chrom annotation
+        fig.add_annotation(
+            x=chr_x[-1] + ampl_chr[-1] / 2,
+            y=0, yshift=15, 
+            text=chr_all[-1], showarrow=False,
+            row=row_no - (last_n_rows - 1), col=1)
 
 
     def get_cluster_hm(self, order):
@@ -343,7 +381,7 @@ class Data(metaclass=abc.ABCMeta):
 
 
     @abc.abstractmethod
-    def get_heatmap(self, order):
+    def get_heatmap(self, order, show_all=True):
         pass
 
 
@@ -401,7 +439,7 @@ class DepthData(Data):
         raise NotImplementedError
 
 
-    def get_heatmap(self, order):
+    def get_heatmap(self, order, show_all=True):
         hm = go.Heatmap(
             z=self.df.loc[order],
             x=['Library size'],
@@ -482,7 +520,7 @@ class ReadData(Data):
 
         # Normalize per amplicon such that avg. cell depth = 2
         df = df.apply(lambda x: x / x.mean() * 2, axis=0)
-        
+
         return df
 
 
@@ -527,7 +565,7 @@ class ReadData(Data):
             axis=0)
 
 
-    def get_heatmap(self, order, show_all):
+    def get_heatmap(self, order, show_all=True):
         if show_all:
             z = np.clip(self.df.loc[order], 0, 6)
             x = self.meta['text']
@@ -554,6 +592,7 @@ class ReadData(Data):
                 'ypad': 0
             }
         )
+
         return hm
 
 
@@ -638,7 +677,7 @@ class SNPData(Data):
     def set_snp_rel(self, snp, new_val):
         self.meta.loc[snp, 'is_rel'] = new_val
         if 'manual' in self.meta.loc[snp, 'reason']:
-            if new_val == False:
+            if new_val is False:
                 self.meta.loc[snp, 'reason'] = self.meta.loc[snp, 'reason'] \
                     .replace('manual;', '')
         else:
@@ -727,8 +766,7 @@ class SNPData(Data):
     def get_amplicons(self, show_all=True):
         if show_all:
             return self.meta['amplicon']
-        else:
-            return self.meta[self.meta['is_rel']]['amplicon']
+        return self.meta[self.meta['is_rel']]['amplicon']
 
 
     def get_heatmap(self, order, show_all=True):

@@ -9,7 +9,7 @@ import loompy
 import numpy as np
 import pandas as pd
 
-EPSILON = np.finfo(np.float64).resolution
+EPSILON = np.finfo(np.float64).resolution # pylint: disable=E1101
 
 CHR_ORDER = {str(i): i for i in range(1, 23)}
 CHR_ORDER.update({'X':23, 'Y':24})
@@ -37,14 +37,14 @@ def concat_str_arrays(arrays, sep='_'):
 
 # ---------------------------------- H5 ----------------------------------------
 
-def load_h5_snps(h5_file, thresholds=DEF_THRESHOLDS):
-    with h5py.File(h5_file, 'r') as f:
-        rel_loci = ~f['assays']['dna_variants']['ca']['filtered'][()]
-        rel_cells = ~f['assays']['dna_variants']['ra']['filtered'][()]
+def load_h5_snps(h5_file, thresholds=None):
+    if thresholds is None:
+        thresholds = DEF_THRESHOLDS
 
+    with h5py.File(h5_file, 'r') as f:
         gt = f['assays']['dna_variants']['layers']['NGT'][()].T
         # (64477, 37)
-        # Sixth filter: Remove variants mutated in < X % of cells; 
+        # Sixth filter: Remove variants mutated in < X % of cells;
         #   done first in mosaic
         mut = (gt == 1) | (gt == 2)
         # Relative value
@@ -55,11 +55,11 @@ def load_h5_snps(h5_file, thresholds=DEF_THRESHOLDS):
             mut_var = np.sum(mut, axis=1) >= thresholds['min_mutated']
         gt = gt[mut_var]
 
-        DP = f['assays']['dna_variants']['layers']['DP'][:,mut_var].T
-        GQ = f['assays']['dna_variants']['layers']['GQ'][:,mut_var].T
-        VAF = f['assays']['dna_variants']['layers']['AF'][:,mut_var].T / 100
-        AD = (DP * VAF).astype('int16')
-        RO = DP - AD
+        dp = f['assays']['dna_variants']['layers']['DP'][:,mut_var].T
+        gq = f['assays']['dna_variants']['layers']['GQ'][:,mut_var].T
+        vaf = f['assays']['dna_variants']['layers']['AF'][:,mut_var].T / 100
+        ad = (dp * vaf).astype('int16')
+        ro = dp - ad
         ampl = f['assays']['dna_variants']['ca']['amplicon'][mut_var].astype(str)
         chrom = f['assays']['dna_variants']['ca']['CHROM'][mut_var].astype(str)
         pos = f['assays']['dna_variants']['ca']['POS'][mut_var]
@@ -67,7 +67,7 @@ def load_h5_snps(h5_file, thresholds=DEF_THRESHOLDS):
         alt = f['assays']['dna_variants']['ca']['ALT'][mut_var].astype(str)
         cells = f['assays']['dna_variants']['ra']['barcode'][()].astype(str)
 
-    return to_output_format(gt, DP, GQ, AD, RO, ampl, chrom, pos, ref, alt, 
+    return to_output_format(gt, dp, gq, ad, ro, ampl, chrom, pos, ref, alt,
         cells, thresholds)
 
 
@@ -88,11 +88,14 @@ def load_h5_reads(h5_file):
 # --------------------------------- LOOM ---------------------------------------
 
 
-def load_loom_snps(loom_file, thresholds=DEF_THRESHOLDS):
+def load_loom_snps(loom_file, thresholds=None):
+    if thresholds is None:
+        thresholds = DEF_THRESHOLDS
+
     with loompy.connect(loom_file) as ds:
         gt = ds[:,:]
         # (64477, 37)
-        # Sixth filter: Remove variants mutated in < X % of cells; 
+        # Sixth filter: Remove variants mutated in < X % of cells;
         #   done first in mosaic
         mut = (gt == 1) | (gt == 2)
         # Relative value
@@ -102,10 +105,10 @@ def load_loom_snps(loom_file, thresholds=DEF_THRESHOLDS):
         else:
             mut_var = np.sum(mut, axis=1) >= thresholds['min_mutated']
         gt = gt[mut_var]
-        DP = ds.layers['DP'][mut_var,:][:,:]
-        GQ = ds.layers['GQ'][mut_var,:][:,:]
-        AD = ds.layers['AD'][mut_var,:][:,:]
-        RO = ds.layers['RO'][mut_var,:][:,:]
+        dp = ds.layers['DP'][mut_var,:][:,:]
+        gq = ds.layers['GQ'][mut_var,:][:,:]
+        ad = ds.layers['AD'][mut_var,:][:,:]
+        ro = ds.layers['RO'][mut_var,:][:,:]
         ampl = ds.ra['amplicon'][mut_var]
         chrom = ds.ra['CHROM'][mut_var]
         pos = ds.ra['POS'][mut_var]
@@ -113,29 +116,29 @@ def load_loom_snps(loom_file, thresholds=DEF_THRESHOLDS):
         alt = ds.ra['ALT'][mut_var]
         cells = ds.col_attrs['barcode']
 
-    return to_output_format(gt, DP, GQ, AD, RO, ampl, chrom, pos, ref, alt,
+    return to_output_format(gt, dp, gq, ad, ro, ampl, chrom, pos, ref, alt,
         cells, thresholds)
 
 
 # ------------------------------- GENERAL --------------------------------------
 
-def preprocess_data(in_file, out_file='', thresholds=DEF_THRESHOLDS):
+def preprocess_data(in_file, out_file='', thresholds=None):
+    if thresholds is None:
+        thresholds = DEF_THRESHOLDS
+
     print(f'Processing file: {in_file}')
     if in_file.endswith('.loom'):
         in_type = 'loom'
-        df, gt, VAF = load_loom_snps(in_file, thresholds)
+        df, gt, vaf = load_loom_snps(in_file, thresholds)
+        df_reads = None
     else:
         in_type = 'h5'
-        df, gt, VAF = load_h5_snps(in_file, thresholds)
+        df, gt, vaf = load_h5_snps(in_file, thresholds)
         df_reads = load_h5_reads(in_file)
-        
-    # post-process filtering
-    df_f = filter_variants(df, gt, VAF, thresholds)
-    df_out = filter_variants_consecutive(df_f, thresholds['proximity'])
 
-    SNP_id = df_out['CHR'] + ':' + df_out['POS'].astype(str) + ':' \
-        + df_out['REF'] + '/' + df_out['ALT']
-    cells = df_out.columns[7:].values
+    # post-process filtering
+    df_f = filter_variants(df, gt, vaf, thresholds)
+    df_out = filter_variants_consecutive(df_f, thresholds['proximity'])
 
     if not out_file:
         out_base = in_file.split('.')[0]
@@ -162,20 +165,20 @@ def preprocess_data(in_file, out_file='', thresholds=DEF_THRESHOLDS):
     return variant_file
 
 
-def to_output_format(gt, DP, GQ, AD, RO, ampl, chrom, pos, ref, alt, cells,
+def to_output_format(gt, dp, gq, ad, ro, ampl, chrom, pos, ref, alt, cells,
         thresholds):
-    VAF = np.where(DP > 0, (AD + EPSILON) / (DP + EPSILON), 0)
-    filter_low_quality(gt, GQ, DP, VAF, thresholds)
-    del DP
-    del GQ
+    vaf = np.where(dp > 0, (ad + EPSILON) / (dp + EPSILON), 0)
+    filter_low_quality(gt, gq, dp, vaf, thresholds)
+    del dp
+    del gq
     gc.collect()
 
     keep_var, keep_cells = filter_low_fractions(gt, thresholds)
 
     gt = gt[keep_var]
-    AD = AD[keep_var][:,keep_cells]
-    RO = RO[keep_var][:,keep_cells]
-    VAF = VAF[keep_var][:,keep_cells]
+    ad = ad[keep_var][:,keep_cells]
+    ro = ro[keep_var][:,keep_cells]
+    vaf = vaf[keep_var][:,keep_cells]
     cells = cells[keep_cells]
 
     variants_info = {
@@ -187,8 +190,8 @@ def to_output_format(gt, DP, GQ, AD, RO, ampl, chrom, pos, ref, alt, cells,
         'NAME': ampl[keep_var],
         'FREQ': np.zeros(np.sum(keep_var))
     }
-    
-    info = concat_str_arrays([RO, AD, gt], ':').T
+
+    info = concat_str_arrays([ro, ad, gt], ':').T
     for i, cell in enumerate(cells):
         variants_info[cell] = info[i]
 
@@ -198,28 +201,28 @@ def to_output_format(gt, DP, GQ, AD, RO, ampl, chrom, pos, ref, alt, cells,
     df.sort_values(['CHR_ORDER', 'POS'], inplace=True)
     df.drop('CHR_ORDER', axis=1, inplace=True)
     gt = gt[df.index.values]
-    VAF = VAF[df.index.values]
+    vaf = vaf[df.index.values]
     df.reset_index(drop=True, inplace=True)
 
-    return df, gt, VAF
+    return df, gt, vaf
 
 
-def filter_low_quality(gt, GQ, DP, VAF, thresholds):
+def filter_low_quality(gt, gq, dp, vaf, thresholds):
     # Filters 1-3: done second in mosaic
     # First filter: Remove genotype in cell with quality < X
-    gt[GQ < thresholds['min_gq']] = 3
+    gt[gq < thresholds['min_gq']] = 3
     # Second filter: Remove genotype in cell with read depth < X
-    gt[DP < thresholds['min_dp']] = 3
+    gt[dp < thresholds['min_dp']] = 3
     # Third filter: Remove genotype in cell with alternate allele freq < X
-    gt[((gt == 1) | (gt == 2)) & (VAF < thresholds['min_vaf'])] = 3
+    gt[((gt == 1) | (gt == 2)) & (vaf < thresholds['min_vaf'])] = 3
 
 
 def filter_low_fractions(gt, thresholds):
-    # Fourth filter: Remove variants genotyped in < X % of cells; 
+    # Fourth filter: Remove variants genotyped in < X % of cells;
     #     done last/fourth in mosaic
     keep_var1 = np.mean(gt == 3, axis=1) < (1 - thresholds['min_var_geno'])
 
-    # Fifth filter: Remove cells with < X %of genotypes present; 
+    # Fifth filter: Remove cells with < X %of genotypes present;
     #     done third in mosaic
     keep_cells = np.mean(gt[keep_var1] == 3, axis=0) \
         < (1 - thresholds['min_cell_geno'])
@@ -232,10 +235,10 @@ def filter_low_fractions(gt, thresholds):
     return keep_var, keep_cells
 
 
-def filter_variants(df, gt, VAF, thresholds):
-    ms1 = (gt == 0) & (VAF > thresholds['max_ref_vaf'])
-    ms2 = (gt == 1) & (VAF < thresholds['min_het_vaf'])
-    ms3 = (gt == 2) & (VAF < thresholds['min_hom_vaf'])
+def filter_variants(df, gt, vaf, thresholds):
+    ms1 = (gt == 0) & (vaf > thresholds['max_ref_vaf'])
+    ms2 = (gt == 1) & (vaf < thresholds['min_het_vaf'])
+    ms3 = (gt == 2) & (vaf < thresholds['min_hom_vaf'])
     ms = ms1 | ms2 | ms3
 
     gt[ms] = 3
@@ -270,8 +273,8 @@ def filter_variants_consecutive(df, proximity):
         fa = np.argwhere((chrom == chrom[loc]) & (np.arange(len(chrom)) > loc)) \
             .flatten()[::-1]
         for jj in fa:
-            for ii in range(len(proximity)):
-                if (pos[loc] + proximity[ii] > pos[jj]) & (jj - loc > ii):
+            for ii, prox_ii in enumerate(proximity):
+                if (pos[loc] + prox_ii > pos[jj]) & (jj - loc > ii):
                     found = 1
             if found == 1:
                 keep[np.arange(loc, jj + 1)] = False
@@ -296,7 +299,7 @@ def parse_args():
     parser.add_argument('-mDP', '--min_dp', type=int,
         default=DEF_THRESHOLDS['min_dp'],
         help='Minimum depth to consider a variant (per cell) .')
-    parser.add_argument('-mAF', '--min_vaf', type=float, 
+    parser.add_argument('-mAF', '--min_vaf', type=float,
         default=DEF_THRESHOLDS['min_vaf'],
         help='Minimum alternate VAF to consider a variant (per cell).')
     parser.add_argument('-mVG', '--min_var_geno', type=float,
@@ -326,10 +329,9 @@ def parse_args():
 
 if __name__ == '__main__':
     args = vars(parse_args())
-    in_file = args.pop('input')
-    out_file = args.pop('output')
-    
-    if not in_file.endswith(('.h5', '.loom')):
-        raise TypeError(f'Input file {in_file} not .loom or .h5')
-    preprocess_data(in_file, out_file, args)
+    args_in_file = args.pop('input')
+    args_out_file = args.pop('output')
 
+    if not args_in_file.endswith(('.h5', '.loom')):
+        raise TypeError(f'Input file {args_in_file} not .loom or .h5')
+    preprocess_data(args_in_file, args_out_file, args)
