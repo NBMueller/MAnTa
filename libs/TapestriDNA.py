@@ -14,8 +14,7 @@ from scipy.spatial.distance import euclidean
 
 
 EPSILON = np.finfo(np.float64).resolution # pylint: disable=E1101
-CHR_ORDER = {str(i): i for i in range(1, 23)}
-CHR_ORDER.update({'X':23, 'Y':24})
+CHR_ORDER = dict({str(i): i for i in range(1, 23, 1)}, **{'X': 23, 'Y': 24})
 PANEL_COLS = ['CHR', 'Start', 'End', 'Gene', 'Exon', 'Strand', 'Feature',
     'Biotype', 'Ensembl_ID', 'TSL', 'HUGO', 'Tx_overlap_%', 'Exon_overlaps_%',
     'CDS_overlaps_%']
@@ -298,13 +297,13 @@ class TapestriDNA:
 
 
     def add_chr_vlines(self, fig, ampl, row_no, last_n_rows=3):
-        chr_all = []
+        chr_str = []
         ampl_chr = []
-        ampl_arm = []
+        ampl_p_arm = []
         for chrom, chr_ampl in self.panel.df.loc[ampl].groupby('CHR', sort=False):
-            chr_all.append(chrom)
+            chr_str.append(chrom)
             ampl_chr.append(chr_ampl.shape[0])
-            ampl_arm.append((chr_ampl['chr_arm'] == 'p').sum())
+            ampl_p_arm.append((chr_ampl['chr_arm'] == 'p').sum())
 
         # Dont show last vline; subtract 0.5 to be on line with heatmap
         chr_x = np.cumsum(ampl_chr[:-1]) - 0.5
@@ -320,18 +319,22 @@ class TapestriDNA:
                         x_annot = chr_x[i-1] + ampl_chr[i] / 2
                     fig.add_annotation(
                         x=x_annot, y=0, yshift=15, 
-                        text=chr_all[i], showarrow=False,
+                        text=chr_str[i], showarrow=False,
                         row=row_no - j, col=1)
 
                 # Chr Arm lines
-                if ampl_arm[i] > 0 and ampl_chr[i] != ampl_arm[i]:
-                    fig.add_vline(chr_x[i - 1] + ampl_arm[i], row=row_no - j,
-                        col=1, line_color='#c3c4c3', line_width=2)
+                if ampl_p_arm[i] > 0 and ampl_p_arm[i] < ampl_chr[i]:
+                    if i == 0:
+                        x = ampl_p_arm[i]
+                    else:
+                        x = chr_x[i - 1] + ampl_p_arm[i]
+                    fig.add_vline(x, row=row_no - j, col=1, line_color='#c3c4c3',
+                        line_width=2)
         # Add last chrom annotation
         fig.add_annotation(
             x=chr_x[-1] + ampl_chr[-1] / 2,
             y=0, yshift=15, 
-            text=chr_all[-1], showarrow=False,
+            text=chr_str[-1], showarrow=False,
             row=row_no - (last_n_rows - 1), col=1)
 
 
@@ -857,6 +860,7 @@ class Panel:
         df = pd.read_csv(in_file, comment='#', sep='\t', header=None,
             index_col=-1, names=col_names)
         df['CHR'] = df['CHR'].str.replace('chr', '')
+
         return df
 
 
@@ -864,6 +868,17 @@ class Panel:
         print(f'\t Adding gene annotation to panel from: {ga_file}')
         ga = pd.read_csv(ga_file, sep='\t', index_col=0)
         self.df['chr_arm'] = self.df['Gene'].map(ga['arm'].to_dict())
+
+        # Check loci before and after if chr arm is not set
+        for idx in np.argwhere(self.df['chr_arm'].isna()).ravel():
+            if (self.df['CHR'].iloc[idx - 1] == self.df['CHR'].iloc[idx + 1]) \
+                    and (self.df.iloc[idx - 1, -1] \
+                        == self.df.iloc[idx + 1, -1]):
+                self.df.iloc[idx, -1] = self.df.iloc[idx + 1, -1]
+            else:
+                print('No chromosome arm annotation for amplicon: ' \
+                    f'')
+
         self._chr_arm = True
 
         self.df['text'] = self.df['text'] + 'Chrom. Arm: ' \
