@@ -4,6 +4,7 @@ import abc
 from copy import deepcopy
 from itertools import cycle
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -59,7 +60,7 @@ CNV_COLORS = [
     (0.500, '#ff0000'), # 3 - 4: Red
     (0.666, '#C60000'), # 4 - 5: Darker Red
     (0.833, '#b90000'), # 5 - 6: Dark Red
-    (1.000, '#000000'), # 5.5 - 6: Black
+    (1.000, '#6B0000'), # 5.5 - 6: Even darker Red
 ]
 
 SNP_COLORS = [
@@ -103,6 +104,8 @@ class TapestriDNA:
         self.reads = ReadData(read_file, cell_order)
         self.reads.add_panel_info(self.panel)
         self.depth = DepthData(read_file, cell_order)
+        # Add amplicon data to snps
+        self.snps.add_amplicon_data(self.reads.meta)
 
         if self.reads.df.shape[0] != self.snps.df.shape[0]:
             print('!Warning: Number of cells in read and SNP files do not match. '\
@@ -310,8 +313,10 @@ class TapestriDNA:
         for i, x in enumerate(chr_x):
             # Add to last 3 plots
             for j in range(last_n_rows):
+                # Add Chr vertical line
                 fig.add_vline(x, row=row_no - j, col=1, line_color='black',
                     line_width=2)
+                # Add Chr text annotation
                 if j == last_n_rows - 1:
                     if i == 0:
                         x_annot = ampl_chr[i]/ 2 - 0.5
@@ -325,11 +330,11 @@ class TapestriDNA:
                 # Chr Arm lines
                 if ampl_p_arm[i] > 0 and ampl_p_arm[i] < ampl_chr[i]:
                     if i == 0:
-                        x = ampl_p_arm[i]
+                        x_arm = ampl_p_arm[i]
                     else:
-                        x = chr_x[i - 1] + ampl_p_arm[i]
-                    fig.add_vline(x, row=row_no - j, col=1, line_color='#c3c4c3',
-                        line_width=2)
+                        x_arm = chr_x[i - 1] + ampl_p_arm[i]
+                    fig.add_vline(x_arm, row=row_no - j, col=1,
+                        line_color='#c3c4c3', line_width=2)
         # Add last chrom annotation
         fig.add_annotation(
             x=chr_x[-1] + ampl_chr[-1] / 2,
@@ -663,19 +668,41 @@ class SNPData(Data):
 
         # Filter SNPs that are irrelevant for clustering
         self.init_relevant_snps()
+        self._update_meta_text()
 
         return df
 
-    def add_panel_info(self, panel_in):
-        self.meta = pd.merge(self.meta,
-                panel_in.df[['Gene', 'chr_arm', 'ampl_per_gene']],
-            left_on='amplicon', right_index=True, how='left')
-        self.meta['text'] = self.meta.apply(lambda x:
-            f'{x.name}<br>Amplicon: {x.amplicon}<br>' \
-                f'Gene: {x.Gene} ({x.ampl_per_gene} ampl.)<br>' \
-                f'Chrom. Arm: {x.CHR}{x.chr_arm}',
-            axis=1)
 
+
+    def _update_meta_text(self):
+        text = '{name}<br>Amplicon: {amplicon}'
+        if 'reason_ampl' in self.meta.columns:
+            text += ' ({reason_ampl})'
+        if 'Gene' in self.meta.columns:
+            text += '<br>Gene: {Gene} ({ampl_per_gene} ampl.)'
+        if 'chr_arm' in self.meta.columns:
+            text += '<br>Chrom. Arm: {CHR}{chr_arm}'
+        
+        def fill_text(x, text):
+            return text.format(**dict(x, **{'name': x.name}))
+
+        self.meta['text'] = self.meta.apply(fill_text, args=(text,), axis=1) \
+            .str.replace(' ()', '')
+
+
+    def add_panel_info(self, panel_in):
+        self.meta = self.meta.merge(
+            panel_in.df[['Gene', 'chr_arm', 'ampl_per_gene']],
+            left_on='amplicon', right_index=True, how='left')
+        self._update_meta_text()
+
+
+    def add_amplicon_data(self, ampl_meta):
+        self.meta = self.meta.merge(
+            ampl_meta['reason'], left_on='amplicon', right_index=True,
+            how='inner', suffixes=('', '_ampl'))
+        self._update_meta_text()
+        
 
     def set_snp_rel(self, snp, new_val):
         self.meta.loc[snp, 'is_rel'] = new_val
@@ -693,15 +720,19 @@ class SNPData(Data):
         self.meta['is_rel'] = True
         self.meta['reason'] = ''
 
+        self.meta['symmetry'] = 0
         for snp, snp_data in self.vaf.items():
             # Skip SNPs with just 1 value. E.g., all VAF == 1
             if snp_data.nunique() == 1:
                 continue
-            corr_sym = np.corrcoef(snp_data.dropna().sort_values(),
-                -1 * snp_data.dropna().sort_values(ascending=False))[0][1]
-            if corr_sym > 0.99:
-                self.meta.loc[snp, 'is_rel'] = False
-                self.meta.loc[snp, 'reason'] += 'symmetry;'
+            
+            vaf_sorted = snp_data.dropna().sort_values().values
+            self.meta.loc[snp, 'symmetry'] = np.corrcoef(
+                    vaf_sorted, -1 * vaf_sorted[::-1])[0][1]
+        
+        symmetric = self.meta['symmetry'] > 0.99
+        self.meta.loc[symmetric, 'is_rel'] = False
+        self.meta.loc[symmetric, 'reason'] += 'symmetry;'
 
         # Identify SNPs that are on the same read in most/all cells and remove
         #   one of them from clustering
@@ -773,19 +804,23 @@ class SNPData(Data):
 
 
     def get_heatmap(self, order, show_all=True):
-        if show_all:
-            z = self.vaf.loc[order].round(2)
-            x = self.meta['text']
-        else:
-            z = self.vaf.loc[order, self.meta['is_rel']].round(2)
-            x = self.meta[self.meta['is_rel']]['text']
+        z = self.vaf.loc[order].round(2)
+        text = 'VAF: ' + z.astype(str) + '   (ref|alt: ' \
+            + self.ref.loc[order].astype(str) + '|' \
+            + self.alt.loc[order].astype(str) + ')<br><br>' \
+            + np.repeat([self.meta['text'].values], order.size, axis=0) \
+            + '<br>cell=' + np.repeat([order], z.shape[1], axis=0).T 
+                
+        if not show_all:
+            z = z.loc[:, self.meta['is_rel']]
+            text = text.loc[:, self.meta['is_rel']]
 
         hm = go.Heatmap(
             z=z, # VAF
             zmin=0,
             zmax=1,
-            x=x, # SNPs
-            y=order, # cells
+            text=text,
+            hoverinfo='text',
             colorscale=SNP_COLORS,
             colorbar={
                 'title': 'VAF',
@@ -806,8 +841,9 @@ class SNPData(Data):
 
 
     def get_relevant_snp_heatmap(self, show_all=True):
-        text = self.meta['text'] + '<br><br>reason: ' \
-                + self.meta['reason'].str.rstrip(';').values
+        text = self.meta['text'] + '<br><br>symmetry (R<sup>2</sup>): ' \
+                + self.meta['symmetry'].round(2).astype(str) \
+                + '<br>filter reason: ' + self.meta['reason'].str.rstrip(';').values
 
         if show_all:
             z = self.meta.loc[:, ['is_rel']].T.astype(int)
