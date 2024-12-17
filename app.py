@@ -4,12 +4,16 @@
 
 # Standard libs
 import argparse
+import base64
+from io import BytesIO
 from multiprocessing import Pool, cpu_count
 import os
 # Third-party libs
 import dash_bootstrap_components as dbc
-from dash import Dash, html, dcc, callback, Output, Input, State
+from dash import Dash, html, dcc, Output, Input, State, callback, no_update
 from dash.exceptions import PreventUpdate
+import numpy as np
+import pandas as pd
 # First-party libs
 from libs.TapestriDNA import TapestriDNA, Panel
 import libs.preprocessing as prep
@@ -22,8 +26,8 @@ DEF_CLUSTER_TYPES = ['doublets', 'healthy']
 panel = Panel()
 datasets = {}
 data = {}
-cl_update_flag = {'apply': False, 'split': False}
-
+cl_update_flag = {'apply': False, 'split': False, 'compass': False}
+clone_update_flag = {'compass': False}
 
 # ------------------------------- HTML LAYOUT ----------------------------------
 
@@ -78,15 +82,17 @@ html_layout = dbc.Container(
             dcc.Dropdown(#options=samples, value=def_sample,
                 id='dropdown-sample', style={'width': '200px'}),
             html.Div([
+                dcc.Upload(
+                    html.Button('Upload COMPASS assignment'), id='upload-compass'),
+                dbc.Alert('Cell barcodes do not match', id='alert-compass',
+                    is_open=False, duration=3000, color='danger'
+                )
+            ], style={}),
+            html.Div([
                 html.Button('Save annotation', id='button-safe',
                     style={'margin-right': 10}),
                 html.Div(id='div-output'),
             ], style={'display':'flex', 'align-items': 'center'}),
-            dcc.Checklist(
-               options={'True': ' show non-relevant SNPs/reads'},
-               value=['True'],
-               id='checklist-relevant'
-            )
         ], style={'display': 'flex', 'align-items': 'baseline', 'gap': '20px'}),
         html.Div([
             html.Div([
@@ -118,6 +124,11 @@ html_layout = dbc.Container(
                 style={'display': 'flex', 'flex-wrap': 'wrap'}),
             html.Button('Apply', id='button-apply', n_clicks=0),
         ]),
+        dcc.Checklist(
+           options={'True': ' show non-relevant SNPs/reads'},
+           value=['True'],
+           id='checklist-relevant'
+        ),
         html.Hr(),
         dcc.Graph(id='graph', style={'height': '100vh'}),
         html.Div(id='hidden-div', style={'display': 'none'}),
@@ -242,15 +253,58 @@ def load_data(sample):
 
 @callback(
     Output('graph', 'figure', allow_duplicate=True),
+    Output('div-assignment', 'children', allow_duplicate=True),
+    Output('input-n-clusters', 'value', allow_duplicate=True),
+    Output('input-n-clones', 'value', allow_duplicate=True),
+    Output('alert-compass', 'is_open', allow_duplicate=True),
+    Input('upload-compass', 'contents'),
+    State('checklist-relevant', 'value'),
+    State('input-snp-weights', 'value'),
+    State('dropdown-sample', 'value'),
+    prevent_initial_call=True
+)
+def load_compass_assignment(contents, show_all, snp_weight, sample):
+    content_type, content_string = contents.split(',')
+    if content_string == '':
+        raise PreventUpdate
+    decoded = base64.b64decode(content_string)
+    df = pd.read_csv(BytesIO(decoded), sep='\t', index_col=0)
+
+    # Check if cell barcodes match
+    if not (df.index.isin(data[sample].cells.index) == False).sum() == 0:
+        return no_update, no_update, no_update, no_update, True
+
+    cl_type_map = {0: 'healthy'}
+    # Replace dbt cells and change clusters to int
+    dbt_cells = df[df['doublet'] == 'yes'].index.values
+    df.loc[dbt_cells, 'node'] = -1
+    df['node'] = df['node'].astype(int)
+    df['node'] = df['node'].replace({-1: df['node'].max() + 1})
+    cl_type_map[df['node'].max()] = 'doublets'
+    assign = df['node'].to_dict()
+    cl_type_map.update(
+        {i: f'tumor {i}' for i in range(1, df['node'].nunique() - 1)})
+
+    data[sample].update_compass(assign, cl_type_map, snp_weight)
+    cl_update_flag['compass'] = True
+    clone_update_flag['compass'] = True
+    fig = data[sample].get_figure(show_all)
+    
+    new_assign = get_annotation_elements(sample, list(cl_type_map.values()),
+        cl_type_map)
+    no_clusters = len(cl_type_map)
+
+    return fig, new_assign, no_clusters, no_clusters - 2, False
+
+
+@callback(
+    Output('graph', 'figure', allow_duplicate=True),
     Input('checklist-relevant', 'value'),
     State('dropdown-sample', 'value'),
     prevent_initial_call=True
 )
 def toggle_relevant(show_all, sample):
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
+    fig = data[sample].get_figure(show_all)
     return fig
 
 
@@ -273,11 +327,12 @@ def update_cluster_number(n_clusters, n_clones, snp_weight, show_all, sample):
     if cl_update_flag['split']:
         cl_update_flag['split'] = False
         raise PreventUpdate
+    # Dont trigger if COMPASS data uploaded
+    if cl_update_flag['compass']:
+        cl_update_flag['compass'] = False
+        raise PreventUpdate
     data[sample].update_clustering(n_clusters, snp_weight)
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
+    fig = data[sample].get_figure(show_all)
     cl_options = get_annotation_options(n_clones)
     annot_el = get_annotation_elements(sample, cl_options)
     return fig, annot_el
@@ -292,6 +347,10 @@ def update_cluster_number(n_clusters, n_clones, snp_weight, show_all, sample):
     prevent_initial_call=True
 )
 def update_clone_number(n_clones, assignments, sample):
+    # Dont trigger if COMPASS data uploaded
+    if clone_update_flag['compass']:
+        clone_update_flag['compass'] = False
+        raise PreventUpdate
     assign = {}
     for dd in get_assignment_dropdown(assignments):
         cl = int(dd['props']['id'].split('-')[1])
@@ -312,10 +371,7 @@ def update_clone_number(n_clones, assignments, sample):
 )
 def update_weight(snp_weight, n_clusters, show_all, sample):
     data[sample].update_clustering(n_clusters, snp_weight)
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
+    fig = data[sample].get_figure(show_all)
     return fig, f': {1 - snp_weight:.2f} - reads'
 
 
@@ -346,14 +402,10 @@ def update_cluster_assignments(_, n_clones, snp_weight, assignments, show_all,
     new_cl = dict(enumerate([i for i in cl_options if i in assign.values()]))
 
     data[sample].update_assignment(assign, new_cl, snp_weight)
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
-
     new_assign = get_annotation_elements(sample, cl_options, assignment=new_cl)
     new_cl_total = data[sample].get_cluster_number()
 
+    fig = data[sample].get_figure(show_all)
     cl_update_flag['apply'] = True
     return fig, new_assign, new_cl_total
 
@@ -397,10 +449,7 @@ def set_snp_relevant(val, snp_raw, snp_weight, n_clusters, show_all, sample):
         raise PreventUpdate
     new_val = val == 'True'
     data[sample].update_snp_rel(snp, new_val, snp_weight, n_clusters)
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
+    fig = data[sample].get_figure(show_all)
     return False, fig
 
 
@@ -421,10 +470,7 @@ def set_snp_relevant(val, snp_raw, snp_weight, n_clusters, show_all, sample):
 def split_cluster(_, title, n_clones, snp_weight, assignments, show_all, sample):
     cl_id = int(title.split(' ')[1])
     data[sample].split_cluster(cl_id, snp_weight)
-    if show_all:
-        fig = data[sample].get_figure(True)
-    else:
-        fig = data[sample].get_figure(False)
+    fig = data[sample].get_figure(show_all)
     # Update assignment
     new_cl_total = data[sample].get_cluster_number()
     new_cl_id = new_cl_total  - 1

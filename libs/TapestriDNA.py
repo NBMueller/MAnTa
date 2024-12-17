@@ -12,6 +12,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from scipy.cluster.hierarchy import linkage, cut_tree, leaves_list
 from scipy.spatial.distance import euclidean
+from scipy.stats import distributions, false_discovery_control, kstest
 
 
 EPSILON = np.finfo(np.float64).resolution # pylint: disable=E1101
@@ -81,6 +82,38 @@ REL_COLORS = [
     (0.5, '#7B9F34'), # lighter green
     (1.0, '#2D882D') # green
 ]
+
+
+def ks_weighted(data1, data2, weights1, weights2):
+    # From: https://stackoverflow.com/questions/40044375
+    def preprocess(d, w):   
+        # Filter nans
+        nan_idx = np.argwhere(np.isnan(d)).ravel()
+        d = np.delete(d, nan_idx)
+        w = np.delete(w, nan_idx)
+        # Return sorted data
+        idx = np.argsort(d)
+        return d[idx], w[idx]
+
+    data1, w1 = preprocess(data1, weights1)
+    data2, w2 = preprocess(data2, weights2)
+   
+    # Merge data
+    data_all = np.concatenate([data1, data2])
+    c_w1 = np.hstack([0, np.cumsum(w1) / sum(w1)])
+    c_w2 = np.hstack([0, np.cumsum(w2) / sum(w2)])
+    cdf_w1 = c_w1[np.searchsorted(data1, data_all, side='right')]
+    cdf_w2 = c_w2[np.searchsorted(data2, data_all, side='right')]
+
+    # Calculate test statistic
+    d = np.max(np.abs(cdf_w1 - cdf_w2))
+    # Calculate sample size
+    m, n = sorted([float(data1.size), float(data2.size)], reverse=True)
+    en = m * n / (m + n)
+    # Calculate p-value (survival function of ks distribution)
+    prob = distributions.kstwo.sf(d, np.round(en))
+    return d, prob
+
 
 # ------------------------------------------------------------------------------
 
@@ -157,6 +190,7 @@ class TapestriDNA:
         else:
             dist_in = self.dist_joint[self.get_dist_cell_ids(cells)]
         dist = np.average(dist_in, axis=1, weights=[snp_weight, (1 - snp_weight)])
+        if np.isnan(dist).any(): import pdb; pdb.set_trace()
         link_matrix = linkage(dist, method='ward')
         order = leaves_list(link_matrix)
         if n_clusters:
@@ -202,7 +236,26 @@ class TapestriDNA:
         assign_int_map = {i: type_cl_map[j] for i, j in new_assignment.items()}
 
         self.cells['cluster'] = self.cells['cluster'].map(assign_int_map)
+        self._update_cell_order(cl_type_map, snp_weight)
+        # Check if healthy vs tumor difference in SNPs if both are set
+        if 'healthy' in cl_type_map.values() and \
+                any([i.startswith('tumor') for i in cl_type_map.values()]):
+            self.snps.set_snp_rel_group_diff(self.cells['assignment'])
+        else:
+            self.snps.clear_group_diff()
+        
 
+    def update_compass(self, compass_assignment, cl_type_map, snp_weight):
+        self.cells['cluster'] = self.cells.index.map(compass_assignment)
+        self.cells['cluster'] = self.cells['cluster'] \
+            .fillna(np.max(list(cl_type_map.keys())))
+        self.cells['cluster'] = self.cells['cluster'].astype(int)
+
+        self.cells['assignment'] = self.cells['cluster'].map(cl_type_map)
+        self._update_cell_order(cl_type_map, snp_weight)
+
+
+    def _update_cell_order(self, cl_type_map, snp_weight):
         new_order = []
         idx_min = 0
         for cl_type in cl_type_map.values():
@@ -714,23 +767,91 @@ class SNPData(Data):
             self.meta.loc[snp, 'reason'] += 'manual;'
 
 
+    def set_snp_rel_group_diff(self, cell_assignment):
+        h_cells = cell_assignment == 'healthy'
+        t_cells = cell_assignment.str.startswith('tumor')
+
+        # Check for group difference
+        for snp, snp_data in self.vaf.items():
+            # Filter cells with <10 reads depth at snp locus
+            h_vals = snp_data[h_cells & (self.dp.loc[:,snp] >= 10)]
+            t_vals = snp_data[t_cells & (self.dp.loc[:,snp] >= 10)]
+            
+            ks_grp = kstest(h_vals, t_vals)
+            ks_grp_qval = min(1, ks_grp.pvalue * self.meta.shape[0])
+
+            self.meta.loc[snp, 'group_diff'] = ks_grp_qval
+
+        no_group_diff = self.meta['group_diff'] > 0.05
+        self.meta.loc[no_group_diff, 'is_rel'] = False
+        self.meta.loc[no_group_diff, 'reason'] += 'no group difference;'
+
+
+    def clear_group_diff(self):
+        self.meta['group_diff'] = np.nan
+        for snp, snp_data in self.meta.iterrows():
+            if snp_data['reason'] == 'no group difference;':
+                self.meta.loc[snp, 'is_rel'] = True
+            new_reason = snp_data['reason'].replace('no group difference;', '')
+            self.meta.loc[snp, 'reason'] = new_reason
+
+
+    def plot_symmetry(self, vaf, vaf_ref, title=None):
+        from matplotlib import pyplot as plt
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.plot(np.linspace(0, 1, vaf.size), sorted(vaf), alpha=0.75, label='VAF')
+        ax.plot(np.linspace(0, 1, vaf_ref.size), sorted(vaf_ref), alpha=0.75,
+            label='1 - reverse(VAF)')
+        ax.plot([0, 1], [0, 1], transform=ax.transAxes, alpha=0.25, color='grey', ls='--')
+        ax.set_xlabel('rel. barcode rank')
+        ax.set_ylabel('VAF')
+        ax.set_title(title)
+        ax.legend()
+        plt.show()
+
+
     def init_relevant_snps(self):
         # Identify SNPs that are symmetric/normal distributed: likely germline + ADO
         # Not informative for clustering
         self.meta['is_rel'] = True
         self.meta['reason'] = ''
+        self.meta['symmetry'] = 0.0
+        self.meta['group_diff'] = np.nan
 
-        self.meta['symmetry'] = 0
+        # Check for VAF symmetry
         for snp, snp_data in self.vaf.items():
-            # Skip SNPs with just 1 value. E.g., all VAF == 1
-            if snp_data.nunique() == 1:
-                continue
-            
-            vaf_sorted = snp_data.dropna().sort_values().values
-            self.meta.loc[snp, 'symmetry'] = np.corrcoef(
-                    vaf_sorted, -1 * vaf_sorted[::-1])[0][1]
-        
-        symmetric = self.meta['symmetry'] > 0.99
+            # Filter cells with <10 reads depth at snp locus
+            vals = snp_data[self.dp.loc[:,snp] >= 10].values
+            # x = vals[(vals > 0.001) & (vals < 0.999)]
+            # ks_sym_pval = kstest(x, 1 - x).pvalue
+
+            # ks_sym_pval = ks_weighted(vals, 1 - vals, self.dp.loc[:,snp], self.dp.loc[:,snp])
+            # ks_sym_pval = ks_sym_weighted[1]
+
+            # Possible allelic dropout: only 1 allele amplified or too low depth
+            pos_ado = (vals <= 0.001) | (vals >= 0.999)
+
+            # Get all intermediate VAFs
+            low_vafs = vals[(vals < 0.5) & ~pos_ado]
+            high_vafs = 1 - vals[(vals > 0.5) & ~pos_ado]
+
+            # VAFs are very unevenly distributed anyhow: q-Value = 0
+            if low_vafs.size < 6 or high_vafs.size < 6:
+                ks_sym_pval = np.nan
+            # Only 50% of data with intermediate VAFs: low q-Value
+            elif pos_ado.mean() > 0.5:
+                ks_sym_pval = np.nan
+            else:
+                ks_sym_pval = kstest(low_vafs, high_vafs).pvalue
+
+            # if snp.startswith('3:10'): self.plot_symmetry(vals, 1 - vals, f'{snp} (pVal: {ks_sym_pval:.3f})' )
+            self.meta.loc[snp, 'symmetry'] = ks_sym_pval
+        # Multiple testing correction
+        # Benjamini-Hochberg; FDR correction
+        # self.meta['symmetry'] = false_discovery_control(self.meta['symmetry'])
+        # Bonferroni; FWER correction
+        self.meta['symmetry'] = (self.meta['symmetry'] * self.meta.shape[0]).clip(0, 1)
+        symmetric = self.meta['symmetry'] > 0.05
         self.meta.loc[symmetric, 'is_rel'] = False
         self.meta.loc[symmetric, 'reason'] += 'symmetry;'
 
@@ -765,6 +886,7 @@ class SNPData(Data):
         wt = (self.vaf.mean() < 0.01) & (self.vaf.isna().mean() < 0.05)
         self.meta.loc[wt, 'is_rel'] = False
         self.meta.loc[wt, 'reason'] += 'wildtype;'
+        #import pdb; pdb.set_trace()
 
 
     def get_pairwise_dists(self, rel_cells=None):
@@ -841,8 +963,10 @@ class SNPData(Data):
 
 
     def get_relevant_snp_heatmap(self, show_all=True):
-        text = self.meta['text'] + '<br><br>symmetry (R<sup>2</sup>): ' \
-                + self.meta['symmetry'].round(2).astype(str) \
+        text = self.meta['text'] + '<br><br>symmetry kstest (q-value): ' \
+                + self.meta['symmetry'].round(3).astype(str) \
+                + '<br>group difference kstest (q-value): ' \
+                + self.meta['group_diff'].round(3).astype(str) \
                 + '<br>filter reason: ' + self.meta['reason'].str.rstrip(';').values
 
         if show_all:
